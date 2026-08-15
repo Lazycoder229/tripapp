@@ -147,6 +147,25 @@ final class Application
         // 2. Load the environment variables from the .env file
         Env::load($basePath);
 
+        // 2.1 Point Config to the config/ directory so Config::get() can find config/*.php.
+        //     Moved ahead of the misconfiguration check below (was step 3.1) so the Logger
+        //     can read config/logging.php before that check ever has a chance to throw.
+        Config::setPath($basePath . 'config');
+
+        // 2.2 Build the Logger and hand it to Handler right away — BEFORE the
+        //     MisconfiguredEnvException check below, which throws immediately on a bad
+        //     .env. If the Logger were bound later (as part of the Container in step 4),
+        //     that specific exception would still be null-logger at catch time and silently
+        //     fall back to raw error_log() instead of landing in storage/log/ like every
+        //     other exception. Building it standalone here (no Container needed yet) closes
+        //     that gap — every exception this Handler ever sees, including this one, now
+        //     goes through the same FileLogger.
+        $logger = new FileLogger(
+            directory: rtrim($basePath, '/') . '/storage/log',
+            minLevel: (string) Config::get('logging.min_level', 'debug'),
+        );
+        Handler::setLogger($logger);
+
         // 3.  The application should not run in production mode with debug enabled. This is a security risk.
         $appEnv   = strtolower($_ENV['APP_ENV'] ?? 'production');
         $appDebug = filter_var($_ENV['APP_DEBUG'] ?? false, FILTER_VALIDATE_BOOLEAN);
@@ -157,10 +176,6 @@ final class Application
                 "CRITICAL SECURITY ERROR: You are not allowed to set APP_DEBUG=true while APP_ENV is set to production. Please fix your .env file immediately to prevent sensitive source code and credential data leaks."
             );
         }
-
-        // 3.1 Point Config to the config/ directory so Config::get() can find config/database.php, etc.
-        //     (previously missing — Config::get() would always fall back to its defaults without this)
-        Config::setPath($basePath . 'config');
 
         // 4. I-instantiate ang Container at Router
         $container = new Container();
@@ -204,16 +219,11 @@ final class Application
         });
 
         // 4.5 Bind Logger: any controller/middleware that type-hints LoggerInterface
-        //     gets this FileLogger auto-wired in. Also handed to Handler (registered
-        //     back in step 1, before Config existed) so uncaught exceptions get
-        //     structured, leveled log entries instead of raw error_log() lines.
-        $container->set(LoggerInterface::class, function () use ($basePath) {
-            return new FileLogger(
-                directory: rtrim($basePath, '/') . '/storage/log',
-                minLevel: (string) Config::get('logging.min_level', 'debug'),
-            );
-        });
-        Handler::setLogger($container->get(LoggerInterface::class));
+        //     gets this same FileLogger auto-wired in — the instance built back in step
+        //     2.2 and already handed to Handler, registered here as-is (not a factory
+        //     closure) so the Container returns this exact instance instead of building
+        //     a second one.
+        $container->set(LoggerInterface::class, $logger);
 
         // 5. Normalize input channels from global states
         $request = Request::createFromGlobals();
