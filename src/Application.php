@@ -174,9 +174,15 @@ final class Application
 
         // 5. Normalize input channels from global states
         $request = Request::createFromGlobals();
-        // 6. Run the middleware pipeline and dispatch the request to the router
+
+        // 6. Run the middleware pipeline and dispatch the request to the router.
+        //    Middlewares auto-discovered under the reserved 'global' group
+        //    (via #[Middleware(alias: '...', groups: ['global'])]) run on
+        //    every request, before route matching — same auto-wiring idiom
+        //    as controllers/route-level middleware, no manual registration.
         $pipeline = new Pipelines($container);
-        
+        $pipeline->pipe(self::$middlewareGroups['global'] ?? []);
+
         $response = $pipeline->process($request, function (Request $request) use ($router): Response {
             return $router->dispatch($request);
         });
