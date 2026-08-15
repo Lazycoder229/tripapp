@@ -22,6 +22,8 @@ use Framework\Session\NativeSession;
 use Framework\Security\Csrf;
 use Framework\Cache\CacheInterface;
 use Framework\Cache\FileCache;
+use Framework\Log\LoggerInterface;
+use Framework\Log\FileLogger;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use Exception;
@@ -200,6 +202,18 @@ final class Application
                 defaultTtl: (int) Config::get('cache.ttl', 3600),
             );
         });
+
+        // 4.5 Bind Logger: any controller/middleware that type-hints LoggerInterface
+        //     gets this FileLogger auto-wired in. Also handed to Handler (registered
+        //     back in step 1, before Config existed) so uncaught exceptions get
+        //     structured, leveled log entries instead of raw error_log() lines.
+        $container->set(LoggerInterface::class, function () use ($basePath) {
+            return new FileLogger(
+                directory: rtrim($basePath, '/') . '/storage/log',
+                minLevel: (string) Config::get('logging.min_level', 'debug'),
+            );
+        });
+        Handler::setLogger($container->get(LoggerInterface::class));
 
         // 5. Normalize input channels from global states
         $request = Request::createFromGlobals();
