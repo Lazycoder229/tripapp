@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Framework\Exception;
 
 use Framework\Http\Response;
+use Framework\Exception\QueryException;
 use Throwable;
 use ErrorException;
 
@@ -74,6 +75,35 @@ final class Handler
     }
 
     /**
+     * Writes full exception detail (class, message, file, line, trace, and —
+     * for a QueryException — the offending SQL/bindings) to the server-side
+     * error log. This is what makes production errors debuggable at all:
+     * the client only ever sees renderProductionPage()'s generic message,
+     * this is where the real detail goes instead.
+     */
+    private function logException(Throwable $e): void
+    {
+        $detail = sprintf(
+            "[ERROR] %s: %s in %s:%d\n%s",
+            get_class($e),
+            $e->getMessage(),
+            $e->getFile(),
+            $e->getLine(),
+            $e->getTraceAsString()
+        );
+
+        if ($e instanceof QueryException) {
+            $detail .= sprintf(
+                "\nSQL: %s\nBindings: %s",
+                $e->getSql(),
+                json_encode($e->getBindings())
+            );
+        }
+
+        error_log($detail);
+    }
+
+    /**
      * Render a clean, readable debug page.
      */
     private function render(Throwable $e, int $status): void
@@ -84,7 +114,11 @@ final class Handler
         // 1. KUNG PRODUCTION MODE: Mag-render ng ligtas na Generic Page
         //    (MisconfiguredEnvException never reaches here — handleException() already
         //    intercepted and logged it above.)
+        //    The full trace still gets written server-side via logException() below —
+        //    "safe for the client" and "invisible to the developer" are not the same
+        //    thing; error_log() never touches the HTTP response the client receives.
         if ($appMode === 'production') {
+            $this->logException($e);
             $this->renderProductionPage($status);
             return;
         }
