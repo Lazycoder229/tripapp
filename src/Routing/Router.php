@@ -42,7 +42,7 @@ final class Router
 
        // --- Class-level Route ---
        //Scan the controller class for a #[Route] attribute to get a prefix and default middleware.
-        $classAttributes = $reflection->getAttributes(Route::class);
+        $classAttributes = $reflection->getAttributes(Route::class, \ReflectionAttribute::IS_INSTANCEOF);
         $classPrefix = '';
         $classMiddleware = [];
 
@@ -55,7 +55,7 @@ final class Router
         // --- Method-level Routes ---
         // Scan each method for #[Route] attributes and register them with the combined path and middleware.
         foreach ($reflection->getMethods() as $method) {
-            $attributes = $method->getAttributes(Route::class);
+            $attributes = $method->getAttributes(Route::class, \ReflectionAttribute::IS_INSTANCEOF);
 
             foreach ($attributes as $attribute) {
                 $routeInstance = $attribute->newInstance();
