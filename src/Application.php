@@ -19,6 +19,7 @@ use Framework\Database\MySQLConnection;
 use Framework\Database\ConnectionConfig;
 use Framework\Session\SessionInterface;
 use Framework\Session\NativeSession;
+use Framework\Security\Csrf;
 use Framework\Cache\CacheInterface;
 use Framework\Cache\FileCache;
 use RecursiveDirectoryIterator;
@@ -182,8 +183,13 @@ final class Application
         $container->set(SessionInterface::class, function () {
             return new NativeSession(
                 lifetimeMinutes: (int) Config::get('session.lifetime', 120),
-                secure: (bool) Config::get('session.secure', false),
+                secure: Config::get('session.secure'), // null = auto-detect (see NativeSession)
             );
+        });
+
+        // 4.3.1 Bind Csrf: depends on SessionInterface above, so resolved through it.
+        $container->set(Csrf::class, function ($c) {
+            return new Csrf($c->get(SessionInterface::class));
         });
 
         // 4.4 Bind Cache: any controller/middleware that type-hints CacheInterface
