@@ -14,13 +14,20 @@ final class NativeSession implements SessionInterface
 {
     private bool $started = false;
 
+    /** Regenerate the session ID at least this often (seconds), even if the
+     *  app never explicitly calls regenerate() on login — defense-in-depth
+     *  against session fixation for routes that don't remember to do it. */
+    private const AUTO_REGENERATE_AFTER = 900; // 15 minutes
+
     /**
-     * @param int  $lifetimeMinutes Cookie/session lifetime, from SESSION_LIFETIME.
-     * @param bool $secure          Whether the session cookie requires HTTPS, from SESSION_SECURE.
+     * @param int       $lifetimeMinutes Cookie/session lifetime, from SESSION_LIFETIME.
+     * @param bool|null $secure          From SESSION_SECURE. Null (unset in .env) means
+     *                                   "auto-detect from the current request's scheme"
+     *                                   rather than silently defaulting to false.
      */
     public function __construct(
         private readonly int $lifetimeMinutes = 120,
-        private readonly bool $secure = false,
+        private readonly ?bool $secure = null,
     ) {
     }
 
@@ -31,11 +38,18 @@ final class NativeSession implements SessionInterface
             return;
         }
 
+        $lifetimeSeconds = $this->lifetimeMinutes * 60;
+
+        // Keep the server-side GC window in sync with the cookie lifetime —
+        // otherwise the cookie can outlive the session data on disk (or the
+        // reverse), so "still logged in" client-side stops meaning anything.
+        ini_set('session.gc_maxlifetime', (string) $lifetimeSeconds);
+
         session_set_cookie_params([
-            'lifetime' => $this->lifetimeMinutes * 60,
+            'lifetime' => $lifetimeSeconds,
             'path'     => '/',
             'domain'   => '',
-            'secure'   => $this->secure,
+            'secure'   => $this->resolveSecure(),
             'httponly' => true,
             'samesite' => 'Lax',
         ]);
@@ -47,6 +61,8 @@ final class NativeSession implements SessionInterface
         // this request, then gets cleared for whatever this request flashes next.
         $_SESSION['_flash_old'] = $_SESSION['_flash_new'] ?? [];
         $_SESSION['_flash_new'] = [];
+
+        $this->autoRegenerateIfStale();
     }
 
     public function get(string $key, mixed $default = null): mixed
@@ -95,6 +111,7 @@ final class NativeSession implements SessionInterface
     {
         $this->start();
         session_regenerate_id(delete_old_session: true);
+        $_SESSION['_last_regenerated'] = time();
     }
 
     public function destroy(): void
@@ -117,5 +134,35 @@ final class NativeSession implements SessionInterface
 
         session_destroy();
         $this->started = false;
+    }
+
+    /**
+     * If SESSION_SECURE is explicitly set in .env, honor it as-is. Otherwise
+     * auto-detect from $_SERVER['HTTPS'] so a plain "forgot to set it" .env
+     * doesn't silently ship a non-Secure cookie on an HTTPS site. Note: this
+     * intentionally does NOT trust X-Forwarded-Proto (that requires a
+     * trusted-proxy list, see Http\Request) — behind a TLS-terminating proxy,
+     * set SESSION_SECURE=true explicitly.
+     */
+    private function resolveSecure(): bool
+    {
+        if ($this->secure !== null) {
+            return $this->secure;
+        }
+
+        $https = $_SERVER['HTTPS'] ?? '';
+        return $https !== '' && $https !== 'off';
+    }
+
+    /** Defense-in-depth: regenerate periodically even if the app never calls
+     *  regenerate() explicitly on login/privilege change. */
+    private function autoRegenerateIfStale(): void
+    {
+        $last = $_SESSION['_last_regenerated'] ?? null;
+
+        if ($last === null || (time() - $last) > self::AUTO_REGENERATE_AFTER) {
+            session_regenerate_id(delete_old_session: true);
+            $_SESSION['_last_regenerated'] = time();
+        }
     }
 }
