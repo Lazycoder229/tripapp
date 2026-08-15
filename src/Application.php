@@ -21,6 +21,7 @@ use Framework\Session\SessionInterface;
 use Framework\Session\NativeSession;
 use Framework\Security\Csrf;
 use Framework\Security\Jwt;
+use Framework\Security\Encrypt;
 use Framework\Cache\CacheInterface;
 use Framework\Cache\FileCache;
 use Framework\Log\LoggerInterface;
@@ -217,6 +218,14 @@ final class Application
         //     check, so apps that don't use JWT auth never pay for it.
         $container->set(Jwt::class, function () {
             return new Jwt();
+        });
+
+        // 4.3.3 Bind Encrypt: reads its key from Env::appKey() (APP_KEY, already required
+        //     at boot regardless — see step 3 above) via its own constructor default.
+        //     Throws at first resolution if APP_KEY doesn't decode to exactly 32 bytes,
+        //     same fail-fast posture as Jwt.
+        $container->set(Encrypt::class, function () {
+            return new Encrypt();
         });
 
         // 4.4 Bind Cache: any controller/middleware that type-hints CacheInterface
