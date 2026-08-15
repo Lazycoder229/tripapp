@@ -20,6 +20,7 @@ use Framework\Database\ConnectionConfig;
 use Framework\Session\SessionInterface;
 use Framework\Session\NativeSession;
 use Framework\Security\Csrf;
+use Framework\Security\Jwt;
 use Framework\Cache\CacheInterface;
 use Framework\Cache\FileCache;
 use Framework\Log\LoggerInterface;
@@ -207,6 +208,15 @@ final class Application
         // 4.3.1 Bind Csrf: depends on SessionInterface above, so resolved through it.
         $container->set(Csrf::class, function ($c) {
             return new Csrf($c->get(SessionInterface::class));
+        });
+
+        // 4.3.2 Bind Jwt: reads its secret/ttl/issuer from config/jwt.php (JWT_SECRET
+        //     etc. in .env) via its own constructor defaults, same idiom as every other
+        //     Config::get()-backed service here. Throws at first resolution if JWT_SECRET
+        //     isn't set — only routes/controllers that actually type-hint Jwt trigger that
+        //     check, so apps that don't use JWT auth never pay for it.
+        $container->set(Jwt::class, function () {
+            return new Jwt();
         });
 
         // 4.4 Bind Cache: any controller/middleware that type-hints CacheInterface
