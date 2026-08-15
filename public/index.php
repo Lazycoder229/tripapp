@@ -1,17 +1,14 @@
 <?php
+declare(strict_types=1);
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
 use Framework\Application;
-use Framework\View\View;
-require_once __DIR__ . '/../src/Helpers/View.php';
-View::setPath(dirname(__DIR__) . '/app/Views');
-Application::create()
-    ->withBindings(function ($container) {
-        // register your bindings here
-        // example:
-        // $container->bind(UserRepositoryInterface::class, MySqlUserRepository::class);
-        // $container->singleton(Database::class, Database::class);
-    })
-    ->withControllerDirectory(dirname(__DIR__) . '/app/Controllers')
-    ->run();
+
+Application::run(
+    controllersPath:      __DIR__ . '/../app/Controller',
+    controllersNamespace: 'App\\Controller',
+    middlewaresPath:      __DIR__ . '/../app/Middleware',
+    middlewaresNamespace: 'App\\Middleware',
+    basePath:             __DIR__ . '/../'
+);

@@ -1,149 +1,140 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Framework\Container;
 
-use Closure;
 use ReflectionClass;
-use ReflectionNamedType;
+use ReflectionParameter;
+use Exception;
 
 /**
- * Container
- *
- * A simple Dependency Injection Container.
- * Resolves class dependencies automatically via Reflection.
- * Supports binding interfaces to concrete implementations.
- *
+ * Pure PHP Dependency Injection Container.
+ * Handles configuration storage and automated dependency resolution (Auto-wiring).
+ * 
  * @package Framework\Container
  */
-class Container
+final class Container
 {
     /**
-     * Registered bindings.
-     * interface/abstract => concrete class or closure
-     *
-     * @var array<string, string|Closure>
+     * Stores configuration values, primitives, or cached shared singleton instances.
      */
-    private array $bindings = [];
+    private array $entries = [];
 
     /**
-     * Resolved singletons.
-     *
-     * @var array<string, object|null>
+     * Manually register a service, configuration value, or a factory closure.
+     * @param string $id The entry ID (class name or service identifier).
+     * @param mixed $value The value, instance, or factory closure to register.
      */
-    private array $singletons = [];
-
-    /**
-     * Bind an abstract (interface) to a concrete implementation.
-     *
-     * Example:
-     * $container->bind(UserRepositoryInterface::class, MySqlUserRepository::class);
-     *
-     * @param string         $abstract
-     * @param string|Closure $concrete
-     * @return void
-     */
-    public function bind(string $abstract, string|Closure $concrete): void
+    public function set(string $id, mixed $value): void
     {
-        $this->bindings[$abstract] = $concrete;
+        $this->entries[$id] = $value;
     }
 
     /**
-     * Bind an abstract as a singleton.
-     * Only one instance will be created and reused.
-     *
-     * @param string         $abstract
-     * @param string|Closure $concrete
-     * @return void
+     * Retrieve a service instance. Automatically auto-wires class dependencies.
+     * @param string $id The entry ID (class name or service identifier).
+     * @return mixed The resolved service instance or value.
      */
-    public function singleton(string $abstract, string|Closure $concrete): void
+    public function get(string $id): mixed
     {
-        $this->bindings[$abstract]  = $concrete;
-        $this->singletons[$abstract] = null;
-    }
-
-    /**
-     * Resolve a class and its dependencies.
-     *
-     * @param string $abstract
-     * @return object
-     * @throws ContainerException
-     */
-    public function make(string $abstract): object
-    {
-        // return singleton if already resolved
-        if (array_key_exists($abstract, $this->singletons)) {
-            if ($this->singletons[$abstract] !== null) {
-                return $this->singletons[$abstract];
+        // 1. If manually bound or already resolved as a singleton, return it
+        if (isset($this->entries[$id])) {
+            // If it is a factory function, execute it first
+            if (is_callable($this->entries[$id]) && !($this->entries[$id] instanceof \Closure === false)) {
+                $this->entries[$id] = call_user_func($this->entries[$id], $this);
             }
+            return $this->entries[$id];
         }
 
-        // check if there's a binding for this abstract
-        $concrete = $this->bindings[$abstract] ?? $abstract;
-
-        // if binding is a closure, call it
-        if ($concrete instanceof Closure) {
-            $instance = $concrete($this);
-        } else {
-            $instance = $this->build($concrete);
+        // 2. If it doesn't exist in entries, check if it's an existing class we can auto-wire
+        if (!class_exists($id)) {
+            throw new Exception("Container Error: Entry or Class '{$id}' could not be found.");
         }
 
-        // store singleton instance
-        if (array_key_exists($abstract, $this->singletons)) {
-            $this->singletons[$abstract] = $instance;
+        return $this->resolve($id);
+    }
+
+    /**
+     * Checks if the container can provide an entry for the given ID.
+     * 
+     * @param string $id The entry ID (class name or service identifier).
+     * @return bool True if the entry exists or can be auto-wired, false otherwise
+     */
+    public function has(string $id): bool
+    {
+        // Check if the entry is manually registered or if the class exists for auto-wiring
+        return isset($this->entries[$id]) || class_exists($id);
+    }
+
+    /**
+     * The Auto-wiring mechanism engine using PHP Reflection API.
+     * 
+     * @param string $className The fully qualified class name to resolve.
+     * @return mixed The resolved instance of the class.
+     */
+    private function resolve(string $className): mixed
+    {
+        $reflectionClass = new ReflectionClass($className);
+
+        // Make sure we can actually instantiate the class
+        if (!$reflectionClass->isInstantiable()) {
+            throw new Exception("Container Error: Class '{$className}' is not instantiable (Abstract or Interface).");
         }
+
+        $constructor = $reflectionClass->getConstructor();
+
+        // If there is no constructor, it has no dependencies! Instantiate immediately.
+        if ($constructor === null) {
+            return new $className();
+        }
+
+        // Inspect the constructor parameters
+        $parameters = $constructor->getParameters();
+        $dependencies = [];
+
+        foreach ($parameters as $parameter) {
+            $dependencies[] = $this->resolveParameter($parameter, $className);
+        }
+
+        // Create the instance, passing the resolved dependencies into the constructor
+        $instance = $reflectionClass->newInstanceArgs($dependencies);
+
+        // Cache it as a singleton so we don't recreate it on subsequent calls
+        $this->entries[$className] = $instance;
 
         return $instance;
     }
 
     /**
-     * Build a class by resolving its constructor dependencies.
-     *
-     * @param string $concrete Fully qualified class name
-     * @return object
-     * @throws ContainerException
+     * Deduce and resolve what dependency a constructor parameter is asking for.
+     * 
+     * @param ReflectionParameter $parameter The constructor parameter to resolve.
+     * @param string $className The class name being resolved (for error messages).
+     * @return mixed The resolved dependency.
      */
-    private function build(string $concrete): object
+    private function resolveParameter(ReflectionParameter $parameter, string $className): mixed
     {
-        try {
-            $reflection = new ReflectionClass($concrete);
-        } catch (\ReflectionException $e) {
-            throw new ContainerException("Class {$concrete} not found.", previous: $e);
-        }
+        $type = $parameter->getType();
 
-        if (!$reflection->isInstantiable()) {
-            throw new ContainerException(
-                "Class {$concrete} is not instantiable. Did you forget to bind it?"
-            );
-        }
-
-        $constructor = $reflection->getConstructor();
-
-        // no constructor — just instantiate
-        if ($constructor === null) {
-            return new $concrete();
-        }
-
-        $args = [];
-
-        foreach ($constructor->getParameters() as $param) {
-            $type = $param->getType();
-
-            // no type hint or built-in type — check for default value
-            if (!$type instanceof ReflectionNamedType || $type->isBuiltin()) {
-                if ($param->isDefaultValueAvailable()) {
-                    $args[] = $param->getDefaultValue();
-                    continue;
-                }
-
-                throw new ContainerException(
-                    "Cannot resolve parameter \${$param->getName()} in {$concrete}."
-                );
+        // Case A: Missing type-hint entirely (e.g., public function __construct($someVariable))
+        if ($type === null) {
+            if ($parameter->isDefaultValueAvailable()) {
+                return $parameter->getDefaultValue();
             }
-
-            // recursively resolve the dependency
-            $args[] = $this->make($type->getName());
+            throw new Exception("Container Error: Cannot resolve untyped parameter '\${$parameter->getName()}' in {$className}.");
         }
 
-        return $reflection->newInstanceArgs($args);
+        // Case B: Primitive/Built-in types (e.g., string, int, bool)
+        if ($type->isBuiltin()) {
+            if ($parameter->isDefaultValueAvailable()) {
+                return $parameter->getDefaultValue();
+            }
+            throw new Exception("Container Error: Parameter '\${$parameter->getName()}' in {$className} expects a built-in '{$type->getName()}', but no default value is set.");
+        }
+
+        // Case C: The type-hint is an Object/Class name (e.g., App\Service\DatabaseService)
+        // Recursively trigger the container's get() method to build that class next!
+        return $this->get($type->getName());
     }
 }

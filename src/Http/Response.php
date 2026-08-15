@@ -1,328 +1,265 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Framework\Http;
 
+use Framework\Exception\FileNotReadableException;
+
 /**
- * Response
+ * This class handles setting HTTP response status codes, bodies, and outbound custom headers safely.
  *
- * Represents the outgoing HTTP response.
- * Manages status code, headers, cookies, and body.
- * Includes security headers by default.
+ * Also provides named constructors for common response shapes (JSON, redirects, file downloads)
+ * and a fluent, chainable API for headers and cookies.
  *
  * @package Framework\Http
  */
 class Response
 {
     /**
-     * Default security headers applied to every response.
+     * Cookies queued to be sent with this response, keyed by cookie name.
+     * Each entry holds the arguments as accepted by PHP's native setcookie().
      */
-    private const SECURITY_HEADERS = [
-        // prevent MIME type sniffing
-        'X-Content-Type-Options'    => 'nosniff',
-        // prevent clickjacking
-        'X-Frame-Options'           => 'SAMEORIGIN',
-        // enable browser XSS protection (legacy browsers)
-        'X-XSS-Protection'          => '1; mode=block',
-        // control referrer information
-        'Referrer-Policy'           => 'strict-origin-when-cross-origin',
-        // restrict browser features
-        'Permissions-Policy'        => 'camera=(), microphone=(), geolocation=()',
-    ];
+    protected array $cookies = [];
 
     /**
-     * Queued cookies to be sent with the response.
-     *
-     * @var array<int, array<string, mixed>>
-     */
-    private array $queuedCookies = [];
-
-    /**
-     * @param int                  $statusCode HTTP status code
-     * @param string               $body       Response body
-     * @param array<string, mixed> $headers    Response headers
+     * @param mixed $content     The response body. String/scalar for normal responses;
+     *                           for file downloads this instead holds the absolute file path
+     *                           (see download()) and $isFileDownload distinguishes the two.
+     * @param int   $statusCode  HTTP status code.
+     * @param array $headers     Response headers, keyed by name (case-insensitive).
+     * @param bool  $isFileDownload Internal flag: when true, send() streams $content as a file path
+     *                           instead of echoing it as body text.
      */
     public function __construct(
-        private int    $statusCode = 200,
-        private string $body       = '',
-        private array  $headers    = [],
-    ) {}
+        protected mixed $content,
+        protected int $statusCode = 200,
+        protected array $headers = [],
+        protected bool $isFileDownload = false
+    ) {
+        // Ensure that header names are normalized to lowercase for consistent handling
+        $normalizedHeaders = [];
+        foreach ($headers as $name => $value) {
+            $normalizedHeaders[strtolower($name)] = $value;
+        }
 
-    // -------------------------------------------------------------------------
-    // Static Constructors
-    // -------------------------------------------------------------------------
+        // Default to text/html for plain string/scalar bodies unless the caller already set one.
+        if (!$isFileDownload && !isset($normalizedHeaders['content-type']) && !is_array($content) && !is_object($content)) {
+            $normalizedHeaders['content-type'] = 'text/html; charset=UTF-8';
+        }
 
-    /**
-     * Create a plain text response.
-     *
-     * @param string $body
-     * @param int    $statusCode
-     * @return static
-     */
-    public static function text(string $body, int $statusCode = 200): static
-    {
-        return new static($statusCode, $body, [
-            'Content-Type' => 'text/plain; charset=UTF-8',
-        ]);
+        $this->headers = $normalizedHeaders;
     }
 
     /**
-     * Create an HTML response.
+     * Named constructor helper for fast structural JSON API outputs.
      *
-     * @param string $body
-     * @param int    $statusCode
-     * @return static
+     * @param array|object $data
+     * @param int $statusCode
+     * @return self
      */
-    public static function html(string $body, int $statusCode = 200): static
+    public static function json(array|object $data, int $statusCode = 200): self
     {
-        return new static($statusCode, $body, [
-            'Content-Type' => 'text/html; charset=UTF-8',
-        ]);
-    }
-
-    /**
-     * Create a JSON response.
-     *
-     * @param array<mixed> $data
-     * @param int          $statusCode
-     * @return static
-     */
-    public static function json(array $data, int $statusCode = 200): static
-    {
-        return new static(
+        return new self(
+            json_encode($data),
             $statusCode,
-            json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-            ['Content-Type' => 'application/json; charset=UTF-8']
+            ['Content-Type' => 'application/json']
         );
     }
 
     /**
-     * Create a redirect response.
+     * Named constructor helper for HTTP redirects.
      *
-     * @param string $url
-     * @param int    $statusCode 301 permanent, 302 temporary, 303 post-redirect-get
-     * @return static
+     * @param string $url Destination URL (relative or absolute).
+     * @param int $statusCode Redirect status code — 302 (temporary) by default, use 301 for permanent.
+     * @return self
      */
-    public static function redirect(string $url, int $statusCode = 302): static
+    public static function redirect(string $url, int $statusCode = 302): self
     {
-        return new static($statusCode, '', [
-            'Location' => $url,
-        ]);
+        return new self('', $statusCode, ['Location' => $url]);
     }
 
     /**
-     * Create a no-content response (e.g. for DELETE endpoints).
+     * Named constructor helper for streaming a file to the client as a download.
      *
-     * @return static
+     * @param string $filePath Absolute path to the file on disk.
+     * @param ?string $downloadName Filename presented to the client; defaults to the file's own basename.
+     * @return self
+     *
+     * @throws FileNotReadableException If the file does not exist or is not readable.
      */
-    public static function noContent(): static
+    public static function download(string $filePath, ?string $downloadName = null): self
     {
-        return new static(204);
-    }
-
-    /**
-     * Create a file download response.
-     *
-     * If $filePath (or part of it) ever comes from request input, pass
-     * $baseDir so the resolved path is checked to actually stay inside it —
-     * otherwise a value like "../../etc/passwd" would be served as-is.
-     *
-     * @param string $filePath    Absolute path to the file
-     * @param string|null $name  Download filename shown to user
-     * @param string|null $baseDir  If set, reject paths that resolve outside this directory
-     * @return static
-     * @throws \RuntimeException
-     */
-    public static function download(string $filePath, ?string $name = null, ?string $baseDir = null): static
-    {
-        if (!file_exists($filePath)) {
-            throw new \RuntimeException("File not found: {$filePath}");
+        if (!is_file($filePath) || !is_readable($filePath)) {
+            throw new FileNotReadableException("500 File Not Readable: '{$filePath}' does not exist or is not readable.");
         }
 
-        if ($baseDir !== null) {
-            $realBase = realpath($baseDir);
-            $realFile = realpath($filePath);
-
-            if ($realBase === false || $realFile === false || !str_starts_with($realFile, $realBase . DIRECTORY_SEPARATOR)) {
-                throw new \RuntimeException("File path is outside the allowed directory.");
-            }
-        }
-
-        $filename = $name ?? basename($filePath);
+        $downloadName ??= basename($filePath);
         $mimeType = mime_content_type($filePath) ?: 'application/octet-stream';
-        $content  = file_get_contents($filePath);
 
-        return new static(200, $content, [
-            'Content-Type'              => $mimeType,
-            'Content-Disposition'       => "attachment; filename=\"{$filename}\"",
-            'Content-Length'            => filesize($filePath),
-            'Cache-Control'             => 'no-cache, no-store, must-revalidate',
-        ]);
+        return new self($filePath, 200, [
+            'Content-Type'        => $mimeType,
+            'Content-Length'      => (string) filesize($filePath),
+            'Content-Disposition' => self::contentDispositionValue($downloadName),
+        ], isFileDownload: true);
     }
 
-    // -------------------------------------------------------------------------
-    // Fluent Modifiers
-    // -------------------------------------------------------------------------
+    /**
+     * Builds a safe Content-Disposition header value for a given download filename.
+     *
+     * $downloadName may end up being caller-supplied (e.g. an originally uploaded filename),
+     * so it can't be trusted to already be a well-formed header value. This strips characters
+     * that could break out of the quoted filename or inject header content (quotes, backslash,
+     * CR/LF), and additionally emits an RFC 6266 filename* fallback so non-ASCII names still
+     * come through correctly for clients that support it.
+     *
+     * @param string $downloadName
+     * @return string
+     */
+    private static function contentDispositionValue(string $downloadName): string
+    {
+        $safeName = str_replace(["\r", "\n", '"', '\\'], '', $downloadName);
+        $encoded  = rawurlencode($downloadName);
+
+        return sprintf(
+            'attachment; filename="%s"; filename*=UTF-8\'\'%s',
+            $safeName,
+            $encoded
+        );
+    }
 
     /**
-     * Set a response header.
-     *
-     * @param string $key
-     * @param string $value
-     * @return static
+     * Add a custom response header to the response.
+     * This method allows you to set a specific header name and value for the HTTP response.
+     * @param string $name The name of the header to set.
+     * @param string $value The value of the header to set.
+     * @return self Returns the current Response instance for method chaining.
      */
-    public function withHeader(string $key, string $value): static
+    public function withHeader(string $name, string $value): self
     {
-        $this->headers[$key] = $value;
+        $this->headers[strtolower($name)] = $value;
         return $this;
     }
 
     /**
-     * Set the HTTP status code.
-     *
-     * @param int $statusCode
-     * @return static
+     * Remove a custom response header from the response.
+     * This method allows you to remove a specific header from the HTTP response.
+     * @param string $name The name of the header to remove.
+     * @return self Returns the current Response instance for method chaining.
      */
-    public function withStatus(int $statusCode): static
+    public function withoutHeader(string $name): self
     {
-        $this->statusCode = $statusCode;
+        unset($this->headers[strtolower($name)]);
         return $this;
     }
 
     /**
-     * Set the Content-Security-Policy header.
-     *
-     * @param string $policy
-     * @return static
-     */
-    public function withCsp(string $policy): static
-    {
-        $this->headers['Content-Security-Policy'] = $policy;
-        return $this;
-    }
-
-    /**
-     * Enable HSTS (HTTP Strict Transport Security).
-     * Only use on HTTPS sites.
-     *
-     * @param int  $maxAge            Seconds to enforce HTTPS (default: 1 year)
-     * @param bool $includeSubdomains
-     * @return static
-     */
-    public function withHsts(int $maxAge = 31536000, bool $includeSubdomains = true): static
-    {
-        $value = "max-age={$maxAge}";
-
-        if ($includeSubdomains) {
-            $value .= '; includeSubDomains';
-        }
-
-        $this->headers['Strict-Transport-Security'] = $value;
-        return $this;
-    }
-
-    /**
-     * Queue a cookie to be sent with the response.
+     * Queues a cookie to be sent with this response.
      *
      * @param string $name
      * @param string $value
-     * @param int    $expires  Unix timestamp (0 = session cookie)
+     * @param int $expires Unix timestamp when the cookie expires; 0 means "until browser session ends".
      * @param string $path
      * @param string $domain
-     * @param bool   $secure   HTTPS only
-     * @param bool   $httpOnly Not accessible via JavaScript
-     * @param string $sameSite 'Strict', 'Lax', or 'None'
-     * @return static
+     * @param bool $secure Only send the cookie over HTTPS.
+     * @param bool $httpOnly Hide the cookie from JavaScript (recommended for session/auth cookies).
+     * @param string $sameSite 'Lax', 'Strict', or 'None'.
+     * @return self Returns the current Response instance for method chaining.
      */
     public function withCookie(
         string $name,
         string $value,
-        int    $expires  = 0,
-        string $path     = '/',
-        string $domain   = '',
-        bool   $secure   = true,
-        bool   $httpOnly = true,
-        string $sameSite = 'Lax',
-    ): static {
-        $this->queuedCookies[] = compact(
-            'name', 'value', 'expires', 'path', 'domain', 'secure', 'httpOnly', 'sameSite'
-        );
+        int $expires = 0,
+        string $path = '/',
+        string $domain = '',
+        bool $secure = false,
+        bool $httpOnly = true,
+        string $sameSite = 'Lax'
+    ): self {
+        $this->cookies[$name] = [
+            'value'    => $value,
+            'expires'  => $expires,
+            'path'     => $path,
+            'domain'   => $domain,
+            'secure'   => $secure,
+            'httpOnly' => $httpOnly,
+            'sameSite' => $sameSite,
+        ];
+
         return $this;
     }
 
     /**
-     * Queue a cookie deletion (expire it immediately).
+     * Queues a cookie for deletion by expiring it in the past.
      *
      * @param string $name
-     * @return static
+     * @param string $path
+     * @param string $domain
+     * @return self Returns the current Response instance for method chaining.
      */
-    public function withoutCookie(string $name): static
+    public function withoutCookie(string $name, string $path = '/', string $domain = ''): self
     {
-        return $this->withCookie($name, '', time() - 3600);
+        return $this->withCookie($name, '', time() - 3600, $path, $domain);
     }
 
     /**
-     * Set cache control headers.
-     *
-     * @param int $seconds How long to cache (0 = no cache)
-     * @return static
+     * Get the current HTTP status code of the response.
+     * @return int The HTTP status code.
      */
-    public function withCache(int $seconds = 0): static
+    public function getStatusCode(): int
     {
-        if ($seconds === 0) {
-            $this->headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
-            $this->headers['Pragma']        = 'no-cache';
-            $this->headers['Expires']       = '0';
-        } else {
-            $this->headers['Cache-Control'] = "public, max-age={$seconds}";
-            $this->headers['Expires']       = gmdate('D, d M Y H:i:s', time() + $seconds) . ' GMT';
-        }
-
-        return $this;
+        return $this->statusCode;
     }
 
-    // -------------------------------------------------------------------------
-    // Send
-    // -------------------------------------------------------------------------
+    /**
+     * Get the current response content.
+     * @return mixed The raw response content (string body, or file path for downloads).
+     */
+    public function getContent(): mixed
+    {
+        return $this->content;
+    }
 
     /**
-     * Send the response to the browser.
-     * Applies security headers, sends cookies, headers, and body.
-     *
+     * Get the current response headers.
+     * @return array The response headers, keyed by lowercase name.
+     */
+    public function getHeaders(): array
+    {
+        return $this->headers;
+    }
+
+    /**
+     * Public API method to send the response to the client.
+     * This method sets the HTTP response code, sends all headers, and outputs the response content
      * @return void
+     *
      */
-   public function send(): void
+    public function send(): void
     {
-        if (!headers_sent()) {
-            http_response_code($this->statusCode);
+        http_response_code($this->statusCode);
 
-            // Apply default security headers
-            foreach (self::SECURITY_HEADERS as $key => $value) {
-                header("{$key}: {$value}");
-            }
-
-            // Apply response-specific headers
-            foreach ($this->headers as $key => $value) {
-                header("{$key}: {$value}");
-            }
-
-            // Send queued cookies
-            foreach ($this->queuedCookies as $cookie) {
-                setcookie(
-                    $cookie['name'],
-                    $cookie['value'],
-                    [
-                        'expires'  => $cookie['expires'],
-                        'path'     => $cookie['path'],
-                        'domain'   => $cookie['domain'],
-                        'secure'   => $cookie['secure'],
-                        'httponly' => $cookie['httpOnly'],
-                        'samesite' => $cookie['sameSite'],
-                    ]
-                );
-            }
+        foreach ($this->headers as $name => $value) {
+            $formattedName = ucwords($name, '-');
+            header("{$formattedName}: {$value}");
         }
 
-        // Always send the response body
-        echo $this->body;
+        foreach ($this->cookies as $name => $cookie) {
+            setcookie($name, $cookie['value'], [
+                'expires'  => $cookie['expires'],
+                'path'     => $cookie['path'],
+                'domain'   => $cookie['domain'],
+                'secure'   => $cookie['secure'],
+                'httponly' => $cookie['httpOnly'],
+                'samesite' => $cookie['sameSite'],
+            ]);
+        }
+
+        if ($this->isFileDownload) {
+            readfile($this->content);
+            return;
+        }
+
+        echo $this->content;
     }
 }

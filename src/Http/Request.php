@@ -1,286 +1,236 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Framework\Http;
 
+use Framework\Exception\PayloadTooLargeException;
+use Framework\Exception\InvalidJsonException;
+
 /**
- * Request
+ * This class encapsulates HTTP request data.
  *
- * Represents the incoming HTTP request.
- * Wraps $_SERVER, $_GET, $_POST, $_FILES, $_COOKIE, and php://input.
- * Input is stored raw — escape it for its actual output context
- * (see Request::escape() for HTML) rather than relying on capture-time
- * sanitization. Includes file upload handling.
+ * Wraps PHP's superglobals ($_GET, $_POST, $_SERVER, $_COOKIE, $_FILES) into
+ * an immutable, testable object. All state is captured once via
+ * createFromGlobals() and never mutated afterward.
  *
  * @package Framework\Http
  */
-class Request
+final class Request
 {
     /**
-     * Whether to trust client-supplied proxy headers (X-Forwarded-For,
-     * CF-Connecting-IP, X-Real-IP) when determining the client IP.
+     * IP addresses of reverse proxies allowed to set X-Forwarded-* headers.
+     * Empty by default — meaning X-Forwarded-Proto/Host/For are ignored entirely and
+     * REMOTE_ADDR/HTTP_HOST/HTTPS are used as-is, since those headers are otherwise
+     * fully client-controllable and could be used to spoof scheme/host/IP.
      *
-     * OFF by default: these headers come from the client and are trivially
-     * spoofable unless you're actually behind a proxy/load balancer that
-     * overwrites them. Only enable this if you've verified your deployment
-     * sits behind a trusted proxy.
+     * Call Request::setTrustedProxies() once at boot (e.g. from Application::run(),
+     * reading a TRUSTED_PROXIES env var) if requests actually pass through a reverse
+     * proxy/load balancer that sets these headers.
+     *
+     * Deliberately NOT readonly/instance state — this is static, boot-time configuration
+     * shared across all Request instances, set once via setTrustedProxies() before any
+     * Request is constructed. (It also can't be readonly: PHP disallows a default value
+     * on a readonly property, and static properties can't be readonly at all.)
+     *
+     * @var string[]
      */
-    private static bool $trustProxyHeaders = false;
+    private static array $trustedProxies = [];
 
     /**
-     * Enable or disable trusting proxy headers for captureIp().
-     * Call this during app bootstrap if you're behind a trusted proxy/CDN.
-     *
-     * @param bool $trust
-     * @return void
-     */
-    public static function trustProxyHeaders(bool $trust = true): void
-    {
-        static::$trustProxyHeaders = $trust;
-    }
-
-    /**
-     * @param string               $method  HTTP method
-     * @param string               $uri     Request URI
-     * @param array<string, mixed> $query   Query string ($_GET)
-     * @param array<string, mixed> $body    Request body
-     * @param array<string, mixed> $headers Request headers
-     * @param array<string, mixed> $cookies Cookies ($_COOKIE)
-     * @param array<string, mixed> $files   Uploaded files ($_FILES)
-     * @param string               $ip      Client IP address
+     * @param array $query        Parsed query string parameters ($_GET).
+     * @param array $body         Parsed request body (POST fields merged with JSON body, if any).
+     * @param array $server       Raw $_SERVER data.
+     * @param array $headers      Normalized (lowercase, dash-separated) request headers.
+     * @param array $cookies      Raw $_COOKIE data.
+     * @param array $files        Normalized $_FILES data (one entry per field, never PHP's raw nested-array shape for multi-uploads).
+     * @param ?string $rawContent Raw request body content, only populated for JSON requests.
      */
     public function __construct(
-        public readonly string $method,
-        public readonly string $uri,
-        public readonly array  $query,
-        public readonly array  $body,
-        public readonly array  $headers,
-        public readonly array  $cookies,
-        public readonly array  $files,
-        public readonly string $ip,
-    ) {}
-
-    /**
-     * Create a Request instance from PHP globals.
-     *
-     * @return static
-     */
-    public static function capture(): static
-    {
-        $method  = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
-        $uri     = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
-        $query   = static::normalize($_GET ?? []);
-        $cookies = static::normalize($_COOKIE ?? []);
-        $headers = static::captureHeaders();
-        $body    = static::captureBody($method, $headers);
-        $files   = static::captureFiles();
-        $ip      = static::captureIp();
-
-        return new static($method, $uri, $query, $body, $headers, $cookies, $files, $ip);
+        private readonly array $query,
+        private readonly array $body,
+        private readonly array $server,
+        private readonly array $headers = [],
+        private readonly array $cookies = [],
+        private readonly array $files = [],
+        private readonly ?string $rawContent = null
+    ) {
     }
 
-    // -------------------------------------------------------------------------
-    // Capture Helpers
-    // -------------------------------------------------------------------------
+    /**
+     * Registers the IP addresses of reverse proxies whose X-Forwarded-* headers should
+     * be trusted. Call once at application boot. Passing an empty array (the default)
+     * means no proxy is trusted and forwarded headers are always ignored.
+     *
+     * @param string[] $proxies
+     */
+    public static function setTrustedProxies(array $proxies): void
+    {
+        self::$trustedProxies = $proxies;
+    }
 
     /**
-     * Capture and normalize request headers from $_SERVER.
+     * Builds a Request instance by capturing PHP's current superglobal state.
      *
-     * @return array<string, string>
+     * @return self
      */
-    private static function captureHeaders(): array
+    public static function createFromGlobals(): self
     {
+        $body = $_POST;
+        $server = $_SERVER;
+        $method = strtoupper($server['REQUEST_METHOD'] ?? 'GET');
+
+        // 1. Extract headers FIRST so we can use them for security checks
         $headers = [];
-
-        foreach ($_SERVER as $key => $value) {
+        foreach ($server as $key => $value) {
             if (str_starts_with($key, 'HTTP_')) {
-                $header           = str_replace('_', '-', substr($key, 5));
-                $header           = ucwords(strtolower($header), '-');
-                $headers[$header] = $value;
+                $name = str_replace('_', '-', strtolower(substr($key, 5)));
+                $headers[$name] = $value;
+            } elseif (in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH'])) {
+                $name = str_replace('_', '-', strtolower($key));
+                $headers[$name] = $value;
             }
         }
 
-        // Content-Type and Content-Length are not prefixed with HTTP_
-        if (isset($_SERVER['CONTENT_TYPE'])) {
-            $headers['Content-Type'] = $_SERVER['CONTENT_TYPE'];
+        // 2. Safely handle Method Spoofing
+        $allowedSpoofMethods = ['PUT', 'PATCH', 'DELETE'];
+        if ($method === 'POST' && isset($_POST['_method'])) {
+            $spoofed = strtoupper($_POST['_method']);
+            if (in_array($spoofed, $allowedSpoofMethods, true)) {
+                $server['REQUEST_METHOD'] = $spoofed;
+                $method = $spoofed;
+            }
         }
 
-        if (isset($_SERVER['CONTENT_LENGTH'])) {
-            $headers['Content-Length'] = $_SERVER['CONTENT_LENGTH'];
-        }
+        // 3. Harden JSON Parsing
+        $rawContent = null;
+        $contentType = $headers['content-type'] ?? '';
 
-        return $headers;
-    }
+        // Only parse if the client explicitly states they are sending JSON
+        if ($method !== 'GET' && str_contains($contentType, 'application/json')) {
 
-    /**
-     * Capture and parse the request body.
-     * Supports JSON and multipart/form-data.
-     *
-     * @param string               $method
-     * @param array<string, mixed> $headers
-     * @return array<string, mixed>
-     */
-    private static function captureBody(string $method, array $headers): array
-    {
-        if (in_array($method, ['GET', 'HEAD'])) {
-            return [];
-        }
-
-        $contentType = $headers['Content-Type'] ?? '';
-
-        if (str_contains($contentType, 'application/json')) {
-            $raw  = file_get_contents('php://input');
-            $data = json_decode($raw, true);
-
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                return [];
+            // DoS Prevention: Reject massive payloads (e.g., > 5MB)
+            $contentLength = (int) ($headers['content-length'] ?? 0);
+            if ($contentLength > 5242880) {
+                throw new PayloadTooLargeException('413 Payload Too Large: request body exceeds the 5MB limit.');
             }
 
-            return static::normalize($data ?? []);
-        }
+            $rawContent = file_get_contents('php://input');
 
-        return static::normalize($_POST ?? []);
-    }
-
-    /**
-     * Capture and normalize uploaded files from $_FILES.
-     * Normalizes multi-file uploads into a consistent structure.
-     *
-     * @return array<string, UploadedFile[]>
-     */
-    private static function captureFiles(): array
-    {
-        $files = [];
-
-        foreach ($_FILES as $key => $file) {
-            if (is_array($file['name'])) {
-                // multiple files: <input type="file" name="photos[]" multiple>
-                $count = count($file['name']);
-                for ($i = 0; $i < $count; $i++) {
-                    $files[$key][] = new UploadedFile(
-                        name:      $file['name'][$i],
-                        tmpName:   $file['tmp_name'][$i],
-                        error:     $file['error'][$i],
-                        size:      $file['size'][$i],
-                        mimeType:  $file['type'][$i],
-                    );
+            if (!empty($rawContent)) {
+                // Catch decoding errors properly
+                try {
+                    $jsonData = json_decode($rawContent, true, 512, JSON_THROW_ON_ERROR);
+                    if (is_array($jsonData)) {
+                        $body = array_merge($body, $jsonData);
+                    }
+                } catch (\JsonException $e) {
+                    throw new InvalidJsonException('400 Invalid JSON Payload: ' . $e->getMessage());
                 }
-            } else {
-                // single file: <input type="file" name="avatar">
-                $files[$key][] = new UploadedFile(
-                    name:      $file['name'],
-                    tmpName:   $file['tmp_name'],
-                    error:     $file['error'],
-                    size:      $file['size'],
-                    mimeType:  $file['type'],
-                );
             }
         }
 
-        return $files;
+        return new self(
+            $_GET,
+            $body,
+            $server,
+            $headers,
+            $_COOKIE,
+            self::normalizeFiles($_FILES),
+            $rawContent ?: null
+        );
     }
 
     /**
-     * Capture the client IP address.
-     * Only consults proxy headers if trustProxyHeaders() has been enabled —
-     * they're client-supplied and spoofable otherwise. Falls back to
-     * REMOTE_ADDR, which the webserver sets from the actual TCP connection.
+     * Normalizes PHP's awkward native $_FILES structure into a flat, predictable shape.
+     *
+     * PHP nests multi-file inputs (e.g. `<input type="file[]">`) as parallel arrays
+     * keyed by property (name[], type[], size[], ...) instead of one array per file.
+     * This flattens both single and multi-file inputs into a consistent
+     * `field => ['name' => ..., 'type' => ..., 'tmp_name' => ..., 'error' => ..., 'size' => ...]`
+     * or `field => [ [...], [...] ]` shape.
+     *
+     * @param array $files Raw $_FILES superglobal.
+     * @return array Normalized file upload data, keyed by field name.
+     */
+    private static function normalizeFiles(array $files): array
+    {
+        $normalized = [];
+
+        foreach ($files as $field => $data) {
+            if (!is_array($data['name'])) {
+                $normalized[$field] = $data;
+                continue;
+            }
+
+            // Multi-file input: transpose the parallel arrays into one array per file.
+            $count = count($data['name']);
+            $entries = [];
+            for ($i = 0; $i < $count; $i++) {
+                $entries[] = [
+                    'name'     => $data['name'][$i],
+                    'type'     => $data['type'][$i],
+                    'tmp_name' => $data['tmp_name'][$i],
+                    'error'    => $data['error'][$i],
+                    'size'     => $data['size'][$i],
+                ];
+            }
+            $normalized[$field] = $entries;
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * Returns the request path, stripped of query string and leading/trailing slashes normalized to one leading slash.
      *
      * @return string
      */
-    private static function captureIp(): string
+    public function getPath(): string
     {
-        $headers = static::$trustProxyHeaders
-            ? [
-                'HTTP_CF_CONNECTING_IP', // Cloudflare
-                'HTTP_X_FORWARDED_FOR',  // Load balancers / proxies
-                'HTTP_X_REAL_IP',        // Nginx proxy
-                'REMOTE_ADDR',           // Direct connection
-            ]
-            : ['REMOTE_ADDR'];
-
-        foreach ($headers as $header) {
-            if (!empty($_SERVER[$header])) {
-                // X-Forwarded-For can contain multiple IPs — take the first
-                $ip = trim(explode(',', $_SERVER[$header])[0]);
-
-                if (filter_var($ip, FILTER_VALIDATE_IP)) {
-                    return $ip;
-                }
-            }
-        }
-
-        return '0.0.0.0';
+        $uri = $this->server['REQUEST_URI'] ?? '/';
+        $parsedUrl = parse_url($uri, PHP_URL_PATH);
+        return '/' . trim($parsedUrl ?: '/', '/');
     }
 
-    // -------------------------------------------------------------------------
-    // Input Normalization & Escaping
-    // -------------------------------------------------------------------------
-
     /**
-     * Normalize an array of input data.
+     * Returns the HTTP method, already normalized for spoofing (see createFromGlobals()).
      *
-     * IMPORTANT: this does NOT HTML-encode values. Encoding on input (instead
-     * of on output) corrupts data — an apostrophe in someone's name becomes
-     * `&#039;` before it ever reaches your database or a JSON response — and
-     * it gives false confidence: it doesn't stop SQL injection, doesn't help
-     * in a JS/attribute context, and produces double-escaped output once you
-     * json_encode() it back out. Escape values for their actual output
-     * context (see Request::escape() for HTML) instead of here.
-     *
-     * @param array<string, mixed> $data
-     * @return array<string, mixed>
+     * @return string
      */
-    private static function normalize(array $data): array
+    public function getMethod(): string
     {
-        $clean = [];
-
-        foreach ($data as $key => $value) {
-            $clean[(string) $key] = is_array($value)
-                ? static::normalize($value)
-                : $value;
-        }
-
-        return $clean;
+        return strtoupper($this->server['REQUEST_METHOD'] ?? 'GET');
     }
 
     /**
-     * HTML-escape a value for safe interpolation into HTML output.
-     * Call this at the point you actually render into HTML — not on every
-     * input value up front. Arrays are escaped recursively.
+     * Retrieves a single normalized request header.
      *
-     * @param mixed $value
-     * @return mixed
+     * @param string $key Header name, case-insensitive, underscore/dash-insensitive.
+     * @param ?string $default Fallback value if the header is not present.
+     * @return ?string
      */
-    public static function escape(mixed $value): mixed
+    public function header(string $key, ?string $default = null): ?string
     {
-        if (is_array($value)) {
-            return array_map([static::class, 'escape'], $value);
-        }
-
-        return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $normalizedKey = str_replace('_', '-', strtolower($key));
+        return $this->headers[$normalizedKey] ?? $default;
     }
 
-    // -------------------------------------------------------------------------
-    // Input Access
-    // -------------------------------------------------------------------------
+    /**
+     * Returns all normalized request headers.
+     *
+     * @return array
+     */
+    public function headers(): array
+    {
+        return $this->headers;
+    }
 
     /**
-     * Get a value from the request body.
+     * Retrieves a single query string parameter.
      *
      * @param string $key
-     * @param mixed  $default
-     * @return mixed
-     */
-    public function input(string $key, mixed $default = null): mixed
-    {
-        return $this->body[$key] ?? $default;
-    }
-
-    /**
-     * Get a value from the query string.
-     *
-     * @param string $key
-     * @param mixed  $default
+     * @param mixed $default
      * @return mixed
      */
     public function query(string $key, mixed $default = null): mixed
@@ -289,72 +239,32 @@ class Request
     }
 
     /**
-     * Get all body inputs.
-     *
-     * @param array<string> $only  Only return these keys
-     * @param array<string> $except Exclude these keys
-     * @return array<string, mixed>
-     */
-    public function all(array $only = [], array $except = []): array
-    {
-        $data = $this->body;
-
-        if (!empty($only)) {
-            $data = array_intersect_key($data, array_flip($only));
-        }
-
-        if (!empty($except)) {
-            $data = array_diff_key($data, array_flip($except));
-        }
-
-        return $data;
-    }
-
-    /**
-     * Check if a key exists in the request body.
+     * Retrieves a single value from the parsed request body (POST fields or JSON).
      *
      * @param string $key
-     * @return bool
-     */
-    public function has(string $key): bool
-    {
-        return isset($this->body[$key]);
-    }
-
-    /**
-     * Get a value straight from PHP's superglobals, bypassing capture()
-     * entirely (e.g. if you need the value exactly as PHP parsed it,
-     * before this Request object was built).
-     *
-     * @param string $key
+     * @param mixed $default
      * @return mixed
      */
-    public function raw(string $key): mixed
+    public function input(string $key, mixed $default = null): mixed
     {
-        return $_POST[$key] ?? $_GET[$key] ?? null;
+        return $this->body[$key] ?? $default;
     }
 
-    // -------------------------------------------------------------------------
-    // Headers & Cookies
-    // -------------------------------------------------------------------------
-
     /**
-     * Get a request header.
+     * Returns the merged query string and body parameters (body takes precedence on key collisions).
      *
-     * @param string $key
-     * @param mixed  $default
-     * @return mixed
+     * @return array
      */
-    public function header(string $key, mixed $default = null): mixed
+    public function all(): array
     {
-        return $this->headers[$key] ?? $default;
+        return array_merge($this->query, $this->body);
     }
 
     /**
-     * Get a cookie value.
+     * Retrieves a single cookie value.
      *
      * @param string $key
-     * @param mixed  $default
+     * @param mixed $default
      * @return mixed
      */
     public function cookie(string $key, mixed $default = null): mixed
@@ -362,87 +272,155 @@ class Request
         return $this->cookies[$key] ?? $default;
     }
 
-    // -------------------------------------------------------------------------
-    // File Uploads
-    // -------------------------------------------------------------------------
-
     /**
-     * Get uploaded file(s) by input name.
-     * Returns an array of UploadedFile instances.
+     * Returns all cookies sent with the request.
      *
-     * @param string $key
-     * @return UploadedFile[]
+     * @return array
      */
-    public function files(string $key): array
+    public function cookies(): array
     {
-        return $this->files[$key] ?? [];
+        return $this->cookies;
     }
 
     /**
-     * Get a single uploaded file by input name.
+     * Retrieves a single normalized uploaded file entry (or list of entries for multi-file fields).
      *
      * @param string $key
-     * @return UploadedFile|null
+     * @return array|null
      */
-    public function file(string $key): ?UploadedFile
+    public function file(string $key): ?array
     {
-        return $this->files[$key][0] ?? null;
+        return $this->files[$key] ?? null;
     }
 
     /**
-     * Check if a file was uploaded.
+     * Returns all normalized uploaded files, keyed by field name.
      *
-     * @param string $key
-     * @return bool
+     * @return array
      */
-    public function hasFile(string $key): bool
+    public function files(): array
     {
-        $file = $this->file($key);
-        return $file !== null && $file->isValid();
+        return $this->files;
     }
 
-    // -------------------------------------------------------------------------
-    // Type Checks
-    // -------------------------------------------------------------------------
-
     /**
-     * Check if request body is JSON.
+     * Checks whether the request declared a JSON content type.
      *
      * @return bool
      */
     public function isJson(): bool
     {
-        return str_contains($this->headers['Content-Type'] ?? '', 'application/json');
+        return str_contains($this->header('content-type', ''), 'application/json');
     }
 
     /**
-     * Check if client expects a JSON response.
+     * Checks whether the client expects a JSON response, based on the Accept header
+     * or an already-JSON request body.
      *
      * @return bool
      */
     public function wantsJson(): bool
     {
-        return str_contains($this->headers['Accept'] ?? '', 'application/json');
+        $accept = $this->header('accept', '');
+        return str_contains($accept, 'application/json') || $this->isJson();
     }
 
     /**
-     * Check if request is an AJAX request.
+     * Returns the raw, unparsed request body content (only populated for JSON requests).
      *
-     * @return bool
+     * @return ?string
      */
-    public function isAjax(): bool
+    public function rawContent(): ?string
     {
-        return ($this->headers['X-Requested-With'] ?? '') === 'XMLHttpRequest';
+        return $this->rawContent;
     }
 
     /**
-     * Check if request is HTTPS.
+     * Returns whether this request arrived via a proxy explicitly registered through
+     * setTrustedProxies(). X-Forwarded-* headers are only honored when this is true.
      *
      * @return bool
      */
-    public function isSecure(): bool
+    private function isFromTrustedProxy(): bool
     {
-        return (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-            || ($_SERVER['SERVER_PORT'] ?? 80) == 443;
+        $remoteAddr = $this->server['REMOTE_ADDR'] ?? '';
+        return $remoteAddr !== '' && in_array($remoteAddr, self::$trustedProxies, true);
+    }
+
+    /**
+     * Returns the best-effort originating client IP address.
+     *
+     * Only trusts X-Forwarded-For/X-Real-IP when the request came from a proxy registered
+     * via setTrustedProxies() — otherwise those headers are fully client-controllable and
+     * would let any visitor claim to be any IP. Falls back to REMOTE_ADDR in all other cases.
+     *
+     * @return ?string
+     */
+    public function getClientIp(): ?string
+    {
+        if ($this->isFromTrustedProxy()) {
+            $forwarded = $this->header('x-forwarded-for');
+            if ($forwarded !== null) {
+                // X-Forwarded-For can be a comma-separated chain; the first entry is the original client.
+                return trim(explode(',', $forwarded)[0]);
+            }
+
+            $realIp = $this->header('x-real-ip');
+            if ($realIp !== null) {
+                return $realIp;
+            }
+        }
+
+        return $this->server['REMOTE_ADDR'] ?? null;
+    }
+
+    /**
+     * Returns the request scheme ('http' or 'https'), honoring a trusted proxy's
+     * X-Forwarded-Proto header only when the request came from a proxy registered
+     * via setTrustedProxies().
+     *
+     * @return string
+     */
+    public function getScheme(): string
+    {
+        if ($this->isFromTrustedProxy() && $this->header('x-forwarded-proto') === 'https') {
+            return 'https';
+        }
+
+        $https = $this->server['HTTPS'] ?? '';
+        return ($https !== '' && $https !== 'off') ? 'https' : 'http';
+    }
+
+    /**
+     * Returns the request host, honoring a trusted proxy's X-Forwarded-Host header only
+     * when the request came from a proxy registered via setTrustedProxies().
+     *
+     * @return string
+     */
+    public function getHost(): string
+    {
+        if ($this->isFromTrustedProxy()) {
+            $forwardedHost = $this->header('x-forwarded-host');
+            if ($forwardedHost !== null) {
+                return $forwardedHost;
+            }
+        }
+
+        return $this->server['HTTP_HOST']
+            ?? $this->server['SERVER_NAME']
+            ?? 'localhost';
+    }
+
+    /**
+     * Returns the full absolute URL of the current request (scheme + host + path + query string).
+     *
+     * @return string
+     */
+    public function fullUrl(): string
+    {
+        $queryString = $this->server['QUERY_STRING'] ?? '';
+        $suffix = $queryString !== '' ? '?' . $queryString : '';
+
+        return $this->getScheme() . '://' . $this->getHost() . $this->getPath() . $suffix;
     }
 }
