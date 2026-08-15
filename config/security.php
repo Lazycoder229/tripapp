@@ -9,4 +9,6 @@ return [
 
     'frame_options'   => Env::get('SECURITY_FRAME_OPTIONS', 'DENY'),
     'referrer_policy' => Env::get('SECURITY_REFERRER_POLICY', 'strict-origin-when-cross-origin'),
+
+    'bcrypt_rounds'   => (int) Env::get('BCRYPT_ROUNDS', 12),
 ];
