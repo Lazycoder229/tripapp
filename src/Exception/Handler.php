@@ -6,6 +6,7 @@ namespace Framework\Exception;
 
 use Framework\Http\Response;
 use Framework\Exception\QueryException;
+use Framework\Log\LoggerInterface;
 use Throwable;
 use ErrorException;
 
@@ -15,14 +16,36 @@ use ErrorException;
  */
 final class Handler
 {
+    private static ?self $instance = null;
+
+    private ?LoggerInterface $logger = null;
+
     /**
      * Register global exception and error handlers.
+     *
+     * Runs before the Container/LoggerInterface exist (Application::run()
+     * needs to catch errors from Env::load()/Config::setPath() too), so it
+     * stays dependency-free here — logMisconfiguration()/logException() fall
+     * back to raw error_log() until setLogger() is called.
      */
     public static function register(): void
     {
-        $handler = new self();
-        set_exception_handler([$handler, 'handleException']);
-        set_error_handler([$handler, 'handleError']);
+        self::$instance = new self();
+        set_exception_handler([self::$instance, 'handleException']);
+        set_error_handler([self::$instance, 'handleError']);
+    }
+
+    /**
+     * Inject the framework's Logger once the Container has built one — call
+     * this right after binding LoggerInterface in Application::run(). Every
+     * exception logged from this point on gets structured, leveled entries
+     * (critical/error) instead of a raw error_log() line.
+     */
+    public static function setLogger(LoggerInterface $logger): void
+    {
+        if (self::$instance !== null) {
+            self::$instance->logger = $logger;
+        }
     }
 
     /**
@@ -64,6 +87,18 @@ final class Handler
      */
     private function logMisconfiguration(Throwable $e): void
     {
+        $context = [
+            'exception' => get_class($e),
+            'file'      => $e->getFile(),
+            'line'      => $e->getLine(),
+            'trace'     => $e->getTraceAsString(),
+        ];
+
+        if ($this->logger !== null) {
+            $this->logger->critical('CRITICAL MISCONFIGURATION: ' . $e->getMessage(), $context);
+            return;
+        }
+
         error_log(sprintf(
             "[CRITICAL MISCONFIGURATION] %s: %s in %s:%d\n%s",
             get_class($e),
@@ -83,6 +118,23 @@ final class Handler
      */
     private function logException(Throwable $e): void
     {
+        if ($this->logger !== null) {
+            $context = [
+                'exception' => get_class($e),
+                'file'      => $e->getFile(),
+                'line'      => $e->getLine(),
+                'trace'     => $e->getTraceAsString(),
+            ];
+
+            if ($e instanceof QueryException) {
+                $context['sql']      = $e->getSql();
+                $context['bindings'] = $e->getBindings();
+            }
+
+            $this->logger->error($e->getMessage(), $context);
+            return;
+        }
+
         $detail = sprintf(
             "[ERROR] %s: %s in %s:%d\n%s",
             get_class($e),
