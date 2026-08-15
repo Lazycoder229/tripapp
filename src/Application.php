@@ -17,6 +17,10 @@ use Framework\Exception\MisconfiguredEnvException;
 use Framework\Database\ConnectionInterface;
 use Framework\Database\MySQLConnection;
 use Framework\Database\ConnectionConfig;
+use Framework\Session\SessionInterface;
+use Framework\Session\NativeSession;
+use Framework\Cache\CacheInterface;
+use Framework\Cache\FileCache;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use Exception;
@@ -170,6 +174,25 @@ final class Application
        // 4.2 Bind the database connection
         $container->set(ConnectionInterface::class, function () {
             return new MySQLConnection(ConnectionConfig::fromConfig());
+        });
+
+        // 4.3 Bind Session: any controller/middleware that type-hints SessionInterface
+        //     gets this NativeSession auto-wired in. Actual session_start() only fires
+        //     on first ->get()/->set() call, not on every request.
+        $container->set(SessionInterface::class, function () {
+            return new NativeSession(
+                lifetimeMinutes: (int) Config::get('session.lifetime', 120),
+                secure: (bool) Config::get('session.secure', false),
+            );
+        });
+
+        // 4.4 Bind Cache: any controller/middleware that type-hints CacheInterface
+        //     gets this FileCache auto-wired in.
+        $container->set(CacheInterface::class, function () use ($basePath) {
+            return new FileCache(
+                directory: rtrim($basePath, '/') . '/storage/cache',
+                defaultTtl: (int) Config::get('cache.ttl', 3600),
+            );
         });
 
         // 5. Normalize input channels from global states
