@@ -7,11 +7,12 @@ namespace App\Controller;
 use Framework\Routing\Attribute\Route;
 use Framework\Http\Request;
 use Framework\Http\Response;
+use Framework\Routing\Attribute\Get;
 
-#[Route('/')]  // 👈 named argument
+#[Route('/')]  
 class HomeController
 {
-   #[Route('/home', 'GET')]
+   #[Get('/')]
     public function index(Request $request): Response
     { 
         return Response::json([
@@ -22,31 +23,31 @@ class HomeController
 
 
 
-    #[Route('/secure', 'GET')]
+    #[Get('/secure')]
     public function secureData(Request $request): array
     {
         return ['status' => 'Success', 'data' => 'Pasok ka sa auto-discovered multi-middleware path!'];
     }
 
-    #[Route('/dashboard', 'GET')]
+    #[Get('/dashboard')]
     public function dashboard(Request $request): string
     {
         return "Welcome to your protected dashboard!";
     }
    
-    #[Route('/public', 'GET')]
+    #[Get('/public')]
     public function publicData(Request $request): array
     {
         // This uses the new $request->headers() API method from scratch
         return $request->headers();
     }
-        #[Route('/crash-test', 'GET')]
+        #[Get('/crash-test')]
     public function crash(Request $request): string
     {
         // Sasadyain nating tawagin ang variable na wala naman para mag-trigger ng internal error
         return $aksidentengMalingVariable; 
     }
-           #[Route('/publics', 'GET')]
+           #[Get('/publics')]
     public function publicDatsa(Request $request): array
     {
         return [

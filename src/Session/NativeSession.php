@@ -13,7 +13,7 @@ namespace Framework\Session;
 final class NativeSession implements SessionInterface
 {
     private bool $started = false;
-
+ 
     /** Regenerate the session ID at least this often (seconds), even if the
      *  app never explicitly calls regenerate() on login — defense-in-depth
      *  against session fixation for routes that don't remember to do it. */
