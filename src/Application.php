@@ -247,6 +247,11 @@ final class Application
         // 5. Normalize input channels from global states
         $request = Request::createFromGlobals();
 
+        // 5.1 Give Handler the current Request so a thrown exception can be rendered as
+        //     JSON (Accept: application/json, or a JSON body) instead of the HTML
+        //     debug/production page — see Handler::wantsJson().
+        Handler::setRequest($request);
+
         // 6. Run the middleware pipeline and dispatch the request to the router.
         //    Middlewares auto-discovered under the reserved 'global' group
         //    (via #[Middleware(alias: '...', groups: ['global'])]) run on

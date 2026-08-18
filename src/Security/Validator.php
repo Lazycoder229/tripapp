@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Framework\Validation;
+namespace Framework\Security;
 
 use Framework\Database\ConnectionInterface;
 use Framework\Exception\ValidationException;
@@ -37,7 +37,7 @@ use Framework\Exception\ValidationException;
  * }, 'The :field must be a valid slug.');
  * ```
  *
- * @package Framework\Validation
+ * @package Framework\Security
  */
 final class Validator
 {
@@ -95,6 +95,15 @@ final class Validator
         $this->rules = array_map(self::parseRuleString(...), $rules);
     }
 
+    /**
+     * Creates a new Validator instance.
+     *
+     * @param array $data
+     * @param array<string, string> $rules
+     * @param array<string, string> $customMessages
+     * @param ConnectionInterface|null $db Required only if a field uses 'unique' or 'exists'.
+     * @param array<string, string> $attributes Optional display-name overrides for :field in messages.
+     */
     public static function make(
         array $data,
         array $rules,
@@ -129,17 +138,31 @@ final class Validator
         self::$unknownRuleHandler = $handler;
     }
 
+    /**
+     * Returns true if the validation fails.
+     *
+     * @return bool
+     */
     public function fails(): bool
     {
         return $this->run() !== [];
     }
 
+    /**
+     * Returns true if the validation passes.
+     *
+     * @return bool
+     */
     public function passes(): bool
     {
         return !$this->fails();
     }
 
-    /** @return array<string, array<int, string>> */
+    /**
+     * Returns the validation errors.
+     *
+     * @return array<string, array<int, string>>
+     */
     public function errors(): array
     {
         return $this->run();
@@ -167,6 +190,8 @@ final class Validator
     }
 
     /**
+     * Validates the input and returns the validated data, or throws a ValidationException.
+     *
      * @return array
      * @throws ValidationException
      */
@@ -179,13 +204,22 @@ final class Validator
         return $this->validated();
     }
 
-    /** @return string[] */
+    /** 
+     * Parses a rule string into an array of individual rules.
+     *
+     * @param string $ruleString
+     * @return string[]
+     */
     private static function parseRuleString(string $ruleString): array
     {
         return array_filter(explode('|', $ruleString), strlen(...));
     }
 
-    /** @return array<string, array<int, string>> */
+    /**
+     * Runs the validation rules on the data.
+     *
+     * @return array<string, array<int, string>>
+     */
     private function run(): array
     {
         if ($this->errors !== null) {
@@ -225,7 +259,14 @@ final class Validator
         return $this->expandSegments(explode('.', $pattern), [], $this->data);
     }
 
-    /** @param string[] $segments @param string[] $prefix */
+    /**
+     * Expands a pattern with wildcards into concrete paths.
+     *
+     * @param string[] $segments
+     * @param string[] $prefix
+     * @param mixed $node
+     * @return string[]
+     */
     private function expandSegments(array $segments, array $prefix, mixed $node): array
     {
         if ($segments === []) {
@@ -290,7 +331,11 @@ final class Validator
         $ref[$last] = $value;
     }
 
-    /** @return string[] */
+    /**
+     * Runs the validation rules on a single field.
+     *
+     * @return string[]
+     */
     private function runField(string $field, array $ruleList): array
     {
         $value      = $this->getValue($this->data, $field);
@@ -393,6 +438,15 @@ final class Validator
         return [$name, explode(',', $paramString)];
     }
 
+    /**
+     * Runs a single rule on a field value, returning an error message if it fails.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @param string $rule
+     * @param string[] $params
+     * @return string|null Error message if the rule fails, or null if it passes.
+     */
     private function applyRule(string $field, mixed $value, string $rule, array $params): ?string
     {
         if (isset(self::$customRules[$rule])) {
@@ -451,6 +505,15 @@ final class Validator
         return $result;
     }
 
+    /**
+     * Returns a formatted error message for an email field.
+     *
+     * @param string $field
+     * @param string $rule
+     * @param string $defaultMessage
+     * @param array<string, string> $replacements
+     * @return string
+     */
     private function checkEmail(string $field, mixed $value): ?string
     {
         return filter_var((string) $value, FILTER_VALIDATE_EMAIL) === false
@@ -458,6 +521,13 @@ final class Validator
             : null;
     }
 
+    /**
+     * Returns a formatted error message for a numeric field.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkNumeric(string $field, mixed $value): ?string
     {
         return is_numeric($value)
@@ -465,6 +535,13 @@ final class Validator
             : $this->message($field, 'numeric', 'The :field must be a number.');
     }
 
+    /**
+     * Returns a formatted error message for an integer field.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkInteger(string $field, mixed $value): ?string
     {
         return filter_var($value, FILTER_VALIDATE_INT) !== false
@@ -472,6 +549,13 @@ final class Validator
             : $this->message($field, 'integer', 'The :field must be an integer.');
     }
 
+    /**
+     * Returns a formatted error message for a string field.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkString(string $field, mixed $value): ?string
     {
         return is_string($value)
@@ -479,6 +563,13 @@ final class Validator
             : $this->message($field, 'string', 'The :field must be a string.');
     }
 
+    /**
+     * Returns a formatted error message for a boolean field.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkBoolean(string $field, mixed $value): ?string
     {
         return in_array($value, [true, false, 0, 1, '0', '1'], true)
@@ -486,6 +577,13 @@ final class Validator
             : $this->message($field, 'boolean', 'The :field must be true or false.');
     }
 
+    /**
+     * Returns a formatted error message for an array field.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkArray(string $field, mixed $value): ?string
     {
         return is_array($value)
@@ -493,6 +591,14 @@ final class Validator
             : $this->message($field, 'array', 'The :field must be an array.');
     }
 
+    /**
+     * Returns a formatted error message for a field that must match a regex pattern.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @param array<string> $params
+     * @return string|null
+     */
     private function checkPattern(string $field, mixed $value, string $pattern, string $ruleName, string $description): ?string
     {
         return is_string($value) && preg_match($pattern, $value) === 1
@@ -500,6 +606,13 @@ final class Validator
             : $this->message($field, $ruleName, "The :field must {$description}.");
     }
 
+    /**
+     * Returns a formatted error message for a URL field.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkUrl(string $field, mixed $value): ?string
     {
         return filter_var((string) $value, FILTER_VALIDATE_URL) === false
@@ -507,6 +620,13 @@ final class Validator
             : null;
     }
 
+    /**
+     * Returns a formatted error message for a date field.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkDate(string $field, mixed $value): ?string
     {
         if (!is_string($value)) {
@@ -519,6 +639,15 @@ final class Validator
             : $this->message($field, 'date', 'The :field must be a valid date.');
     }
 
+
+    /**
+     * Returns a formatted error message for a date field with a specific format.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @param array<string> $params
+     * @return string|null
+     */
     private function checkDateFormat(string $field, mixed $value, array $params): ?string
     {
         $format = $params[0] ?? null;
@@ -564,6 +693,13 @@ final class Validator
             : $this->message($field, $word, "The :field must be a date {$word} :other.", [':other' => $this->displayName($other)]);
     }
 
+    /**
+     * Returns a formatted error message for a UUID field.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkUuid(string $field, mixed $value): ?string
     {
         return is_string($value) && preg_match(self::PATTERN_UUID, $value) === 1
@@ -571,6 +707,13 @@ final class Validator
             : $this->message($field, 'uuid', 'The :field must be a valid UUID.');
     }
 
+    /**
+     * Returns a formatted error message for a JSON.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @return string|null
+     */
     private function checkJson(string $field, mixed $value): ?string
     {
         if (!is_string($value)) {
@@ -584,6 +727,14 @@ final class Validator
             : $this->message($field, 'json', 'The :field must be a valid JSON string.');
     }
 
+    /**
+     * Returns a formatted error message for an IP address.
+     *
+     * @param string $field
+     * @param mixed $value
+     * @param int|null $flag Optional filter_var flag for IPv4/IPv6.
+     * @return string|null
+     */
     private function checkIp(string $field, mixed $value, ?int $flag): ?string
     {
         $options = $flag !== null ? ['flags' => $flag] : [];
@@ -618,6 +769,7 @@ final class Validator
         };
     }
 
+    /** Shared sizing for min/max/size/between — string length, numeric value, or array count. */
     private function checkSize(string $field, mixed $value, array $params, string $ruleName, callable $compare, string $descriptor): ?string
     {
         $bound = (float) ($params[0] ?? 0);
@@ -628,6 +780,7 @@ final class Validator
             : $this->message($field, $ruleName, "The :field must {$descriptor}.");
     }
 
+    /** between:min,max — string length, numeric value, or array count must be within the range. */
     private function checkBetween(string $field, mixed $value, array $params): ?string
     {
         $min = (float) ($params[0] ?? 0);
@@ -639,6 +792,7 @@ final class Validator
             : $this->message($field, 'between', "The :field must be between {$params[0]} and {$params[1]}.");
     }
 
+    /** digits:length — string must be exactly length digits. */
     private function checkDigits(string $field, mixed $value, array $params): ?string
     {
         $length = $params[0] ?? '0';
@@ -649,6 +803,7 @@ final class Validator
             : $this->message($field, 'digits', "The :field must be {$length} digits.");
     }
 
+    /** digits_between:min,max — string must be between min and max digits. */
     private function checkDigitsBetween(string $field, mixed $value, array $params): ?string
     {
         [$min, $max] = array_pad($params, 2, '0');
@@ -660,6 +815,7 @@ final class Validator
             : $this->message($field, 'digits_between', "The :field must be between {$min} and {$max} digits.");
     }
 
+    /** in:val1,val2,... — the value must be one of the listed values. */
     private function checkIn(string $field, mixed $value, array $params): ?string
     {
         return in_array((string) $value, $params, true)
@@ -667,6 +823,7 @@ final class Validator
             : $this->message($field, 'in', 'The selected :field is invalid.');
     }
 
+    /** regex:pattern — the value must match the given regex pattern. */
     private function checkRegex(string $field, mixed $value, array $params): ?string
     {
         $pattern = $params[0] ?? null;
@@ -676,6 +833,7 @@ final class Validator
             : $this->message($field, 'regex', 'The :field format is invalid.');
     }
 
+    /** same:other_field — the value must match another field's value. */
     private function checkSame(string $field, mixed $value, array $params): ?string
     {
         $other = $params[0] ?? null;
@@ -685,6 +843,7 @@ final class Validator
             : $this->message($field, 'same', 'The :field must match :other.', [':other' => $this->displayName((string) $other)]);
     }
 
+    /** different:other_field — the value must be different from another field's value. */
     private function checkDifferent(string $field, mixed $value, array $params): ?string
     {
         $other = $params[0] ?? null;
@@ -770,6 +929,13 @@ final class Validator
             : $this->message($field, 'exists', 'The selected :field is invalid.');
     }
 
+    /**
+     * Asserts that a database connection is available.
+     *
+     * @param string $field
+     * @param string $rule
+     * @return void
+     */
     private function assertDb(string $field, string $rule): void
     {
         if ($this->db === null) {
@@ -780,7 +946,14 @@ final class Validator
         }
     }
 
-    /** @param array<int, string|null> $identifiers */
+    /**
+     * Asserts that the provided identifiers are valid.
+     *
+     * @param array<int, string|null> $identifiers
+     * @param string $field
+     * @param string $rule
+     * @return void
+     */
     private function assertIdentifiers(string $field, string $rule, array $identifiers): void
     {
         foreach ($identifiers as $identifier) {
@@ -792,12 +965,26 @@ final class Validator
         }
     }
 
+    /**
+     * Returns the display name for a field.
+     *
+     * @param string $field
+     * @return string
+     */
     private function displayName(string $field): string
     {
         return $this->attributes[$field] ?? str_replace('_', ' ', $field);
     }
 
-    /** @param array<string, string> $replacements Extra :token => value substitutions beyond :field. */
+    /** 
+     * Returns a formatted error message for a field.
+     *
+     * @param string $field
+     * @param string $rule
+     * @param string $default
+     * @param array<string, string> $replacements Extra :token => value substitutions beyond :field.
+     * @return string
+     */
     private function message(string $field, string $rule, string $default, array $replacements = []): string
     {
         $template = $this->customMessages["{$field}.{$rule}"] ?? $default;

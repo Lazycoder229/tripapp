@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Framework\Exception;
 
 use Framework\Http\Response;
+use Framework\Http\Request;
 use Framework\Exception\QueryException;
 use Framework\Log\LoggerInterface;
 use Throwable;
@@ -19,6 +20,13 @@ final class Handler
     private static ?self $instance = null;
 
     private ?LoggerInterface $logger = null;
+
+    /**
+     * The current request, set via setRequest() once Application::run() has
+     * built one (step 5). Null for anything that throws before that point
+     * (e.g. a bad .env) — wantsJson() falls back to raw $_SERVER headers then.
+     */
+    private ?Request $request = null;
 
     /**
      * Register global exception and error handlers.
@@ -49,6 +57,19 @@ final class Handler
     }
 
     /**
+     * Inject the current Request once Application::run() has built one, so
+     * handleException() can tell whether the client wants a JSON error
+     * response (Accept: application/json, or a JSON request body) instead
+     * of the HTML debug/production page.
+     */
+    public static function setRequest(Request $request): void
+    {
+        if (self::$instance !== null) {
+            self::$instance->request = $request;
+        }
+    }
+
+    /**
      * Convert PHP warnings/notices into proper ErrorExceptions.
      */
     public function handleError(int $severity, string $message, string $file, int $line): void
@@ -70,14 +91,90 @@ final class Handler
         if ($e instanceof MisconfiguredEnvException) {
             $this->logMisconfiguration($e);
             http_response_code(503);
-            $this->renderProductionPage(503);
+            if ($this->wantsJson()) {
+                $this->renderJson($e, 503);
+            } else {
+                $this->renderProductionPage(503);
+            }
             exit;
         }
 
         $status = $e instanceof FrameworkException ? $e->getStatusCode() : 500;
         http_response_code($status);
+
+        if ($this->wantsJson()) {
+            // Still logged the same way as the HTML path — see logException()
+            // inside render()'s production branch. JSON responses skip that
+            // branch entirely, so log explicitly here instead.
+            $appMode = strtolower($_ENV['APP_ENV'] ?? 'production');
+            if ($appMode === 'production') {
+                $this->logException($e);
+            }
+            $this->renderJson($e, $status);
+            exit;
+        }
+
         $this->render($e, $status);
         exit;
+    }
+
+    /**
+     * Whether the client expects a JSON error response rather than the HTML
+     * debug/production page — based on the current Request's Accept header
+     * or JSON body, matching Request::wantsJson()'s own rule. Falls back to
+     * reading $_SERVER directly for exceptions thrown before a Request
+     * exists yet (e.g. a bad .env during boot).
+     */
+    private function wantsJson(): bool
+    {
+        if ($this->request !== null) {
+            return $this->request->wantsJson();
+        }
+
+        $accept      = $_SERVER['HTTP_ACCEPT'] ?? '';
+        $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+
+        return str_contains($accept, 'application/json') || str_contains($contentType, 'application/json');
+    }
+
+    /**
+     * Renders a structured JSON error response instead of the HTML debug/
+     * production page. ValidationException gets its full field => [messages]
+     * map — that's the one case where the "detail" is meant for the client,
+     * not just the developer. Everything else follows the same
+     * debug-vs-production masking as render(): full detail (class, file,
+     * line) outside production or with APP_DEBUG on, a generic message in
+     * production.
+     */
+    private function renderJson(Throwable $e, int $status): void
+    {
+        header('Content-Type: application/json');
+
+        $appMode = strtolower($_ENV['APP_ENV'] ?? 'production');
+        $debug   = filter_var($_ENV['APP_DEBUG'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $showDetail = $appMode !== 'production' || $debug;
+
+        if ($e instanceof ValidationException) {
+            echo json_encode([
+                'message' => $e->getMessage(),
+                'errors'  => $e->getErrors(),
+            ], JSON_PRETTY_PRINT);
+            return;
+        }
+
+        $payload = [
+            'message' => $showDetail
+                ? $e->getMessage()
+                : ($status === 404 ? 'Not Found' : 'Something went wrong.'),
+        ];
+
+        if ($showDetail) {
+            $payload['exception'] = get_class($e);
+            $payload['file']      = $e->getFile();
+            $payload['line']      = $e->getLine();
+        }
+
+        echo json_encode($payload, JSON_PRETTY_PRINT);
     }
 
     /**
