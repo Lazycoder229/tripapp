@@ -95,7 +95,7 @@ The framework currently declares PHP `^8.4` as its runtime requirement.
 ## Installation
 
 ```bash
-composer require trip/app <app-name>
+composer create-project trip/app <app-name>
 ```
 
 Enter the project directory:
@@ -147,26 +147,6 @@ php trip jwt:secret
 ```
 
 Refer to `.env.example` in the repository for the available configuration options.
-
----
-
-# Testing
-
-TRIP uses PHPUnit.
-
-Run the test suite with:
-
-```bash
-composer test
-```
-
-The Composer configuration defines the test script as:
-
-```bash
-phpunit
-```
-
-PHPUnit is included as a development dependency.
 
 ---
 
