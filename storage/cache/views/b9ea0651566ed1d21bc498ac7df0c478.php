@@ -1,0 +1,1 @@
+<div>Test View: <?= htmlspecialchars((string)($message), ENT_QUOTES, 'UTF-8'); ?></div>
