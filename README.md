@@ -150,26 +150,6 @@ Refer to `.env.example` in the repository for the available configuration option
 
 ---
 
-# Testing
-
-TRIP uses PHPUnit.
-
-Run the test suite with:
-
-```bash
-composer test
-```
-
-The Composer configuration defines the test script as:
-
-```bash
-phpunit
-```
-
-PHPUnit is included as a development dependency.
-
----
-
 # Contributing
 
 Contributions are welcome.
