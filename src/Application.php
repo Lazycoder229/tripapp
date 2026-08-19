@@ -22,8 +22,8 @@ use Framework\Session\NativeSession;
 use Framework\Security\Csrf;
 use Framework\Security\Jwt;
 use Framework\Security\Encrypt;
-use Framework\Cache\CacheInterface;
-use Framework\Cache\FileCache;
+use Framework\Session\CacheInterface;
+use Framework\Session\FileCache;
 use Framework\Log\LoggerInterface;
 use Framework\Log\FileLogger;
 use RecursiveDirectoryIterator;
@@ -35,7 +35,7 @@ use ReflectionClass;
  * Application class
  * 
  * This class serves as the entry point for the application. It handles the initialization of the environment,
- * automatic discovery of controllers and middlewares, and manages the request-response lifecycle.
+ * automatic discovery of controllers and middlewares, route caching, and manages the request-response lifecycle.
  * 
  * @package Framework
  */
@@ -127,32 +127,145 @@ final class Application
      * @param string $groupName The name of the middleware group.
      * @param array $middlewareClasses An array of fully qualified middleware class names.
      */
-
     public static function getMiddlewareGroups(): array
     {
         return self::$middlewareGroups;
     }
 
     /**
+     * Resolves the absolute path to the route cache file.
+     */
+    public static function getRouteCachePath(string $basePath = ''): string
+    {
+        $customPath = Config::get('cache.route_cache_path');
+        if (!empty($customPath)) {
+            return (string) $customPath;
+        }
+        return rtrim($basePath, '/') . '/storage/cache/routes.php';
+    }
+
+    /**
+     * Checks if a valid compiled route cache file exists.
+     */
+    public static function hasRouteCache(string $basePath = ''): bool
+    {
+        return is_file(self::getRouteCachePath($basePath));
+    }
+
+    /**
+     * Loads middleware groups and routes from the compiled route cache file.
+     */
+    public static function loadRouteCache(string $basePath = '', ?Router $router = null): bool
+    {
+        $cacheFile = self::getRouteCachePath($basePath);
+        if (!is_file($cacheFile)) {
+            return false;
+        }
+
+        $cached = require $cacheFile;
+        if (!is_array($cached)) {
+            return false;
+        }
+
+        self::$middlewareGroups = $cached['middleware_groups'] ?? [];
+        if ($router !== null) {
+            $router->loadFromCache($cached['router'] ?? $cached);
+        }
+
+        return true;
+    }
+
+    /**
+     * Discovers and compiles all routes and middleware groups into an exportable array.
+     */
+    public static function compileRouteCache(
+        string $controllersPath,
+        string $controllersNamespace,
+        string $middlewaresPath,
+        string $middlewaresNamespace,
+        string $basePath = ''
+    ): array {
+        self::$middlewareGroups = [];
+        self::autoDiscoverMiddlewares($middlewaresPath, $middlewaresNamespace);
+
+        $container = new Container();
+        $router = new Router($container);
+        self::autoDiscoverControllers($controllersPath, $controllersNamespace, $router);
+
+        return [
+            'generated_at'      => date('c'),
+            'middleware_groups' => self::$middlewareGroups,
+            'router'            => $router->getCompiledData(),
+        ];
+    }
+
+    /**
+     * Compiles and persists the route cache to disk as an OPcache-ready PHP file.
+     */
+    public static function cacheRoutes(
+        string $controllersPath,
+        string $controllersNamespace,
+        string $middlewaresPath,
+        string $middlewaresNamespace,
+        string $basePath = ''
+    ): string {
+        $data = self::compileRouteCache(
+            $controllersPath,
+            $controllersNamespace,
+            $middlewaresPath,
+            $middlewaresNamespace,
+            $basePath
+        );
+
+        $cacheFile = self::getRouteCachePath($basePath);
+        $cacheDir = dirname($cacheFile);
+        if (!is_dir($cacheDir)) {
+            mkdir($cacheDir, 0775, true);
+        }
+
+        $content = "<?php\n\n// Auto-generated Route Cache - DO NOT EDIT MANUALLY\n// Generated at: " . date('Y-m-d H:i:s') . "\n\nreturn " . var_export($data, true) . ";\n";
+
+        if (file_put_contents($cacheFile, $content, LOCK_EX) === false) {
+            throw new \RuntimeException("Failed to write route cache file: {$cacheFile}");
+        }
+
+        return $cacheFile;
+    }
+
+    /**
+     * Clears the compiled route cache file from storage.
+     */
+    public static function clearRouteCache(string $basePath = ''): bool
+    {
+        $cacheFile = self::getRouteCachePath($basePath);
+        if (is_file($cacheFile)) {
+            return @unlink($cacheFile);
+        }
+        return true;
+    }
+
+    /**
      * Runs the application lifecycle processes
      */
-   public static function run(
+    public static function run(
         string $controllersPath, 
         string $controllersNamespace,
         string $middlewaresPath,       
         string $middlewaresNamespace,
         string $basePath = ''
     ): void {
-        // 1.Build the Exception Handler and register it to catch all uncaught exceptions
+        // 1. Build the Exception Handler and register it to catch all uncaught exceptions
         Handler::register();
 
         // 2. Load the environment variables from the .env file
         Env::load($basePath);
 
-        // 2.1 Point Config to the config/ directory so Config::get() can find config/*.php.
-        //     Moved ahead of the misconfiguration check below (was step 3.1) so the Logger
-        //     can read config/logging.php before that check ever has a chance to throw.
-        Config::setPath($basePath . 'config');
+        // 2.1 Load compiled config cache or set config directory path
+        if (Config::hasCache($basePath)) {
+            Config::loadCache($basePath);
+        } else {
+            Config::setPath($basePath . 'config');
+        }
 
         // 2.2 Build the Logger and hand it to Handler right away — BEFORE the
         //     MisconfiguredEnvException check below, which throws immediately on a bad
@@ -168,30 +281,33 @@ final class Application
         );
         Handler::setLogger($logger);
 
-        // 3.  The application should not run in production mode with debug enabled. This is a security risk.
+        // 3. The application should not run in production mode with debug enabled. This is a security risk.
         $appEnv   = strtolower($_ENV['APP_ENV'] ?? 'production');
         $appDebug = filter_var($_ENV['APP_DEBUG'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
-        //Check if the application is running in production mode with debug enabled. If so, throw a MisconfiguredEnvException to prevent sensitive data leaks.
+        // Check if the application is running in production mode with debug enabled. If so, throw a MisconfiguredEnvException to prevent sensitive data leaks.
         if ($appEnv === 'production' && $appDebug === true) {
             throw new MisconfiguredEnvException(
                 "CRITICAL SECURITY ERROR: You are not allowed to set APP_DEBUG=true while APP_ENV is set to production. Please fix your .env file immediately to prevent sensitive source code and credential data leaks."
             );
         }
 
-        // 4. I-instantiate ang Container at Router
+        // 4. Instantiate Container and Router
         $container = new Container();
         $router = new Router($container);
 
-        // 4.1 Scan modules and capture structural setups
-        self::autoDiscoverMiddlewares($middlewaresPath, $middlewaresNamespace);
-        self::autoDiscoverControllers($controllersPath, $controllersNamespace, $router);
+        // 4.1 Scan modules or load pre-compiled route cache
+        if (self::hasRouteCache($basePath)) {
+            self::loadRouteCache($basePath, $router);
+        } else {
+            self::autoDiscoverMiddlewares($middlewaresPath, $middlewaresNamespace);
+            self::autoDiscoverControllers($controllersPath, $controllersNamespace, $router);
+        }
 
         // 4.2 Bind the database connection: any controller/middleware that type-hints
         //     ConnectionInterface will get this MySQLConnection instance auto-wired in.
         //     Wrapped in a closure so the actual PDO connection is only opened on first use,
         //     not on every request even for routes that never touch the database.
-       // 4.2 Bind the database connection
         $container->set(ConnectionInterface::class, function () {
             return new MySQLConnection(ConnectionConfig::fromConfig());
         });
@@ -237,12 +353,11 @@ final class Application
             );
         });
 
-        // 4.5 Bind Logger: any controller/middleware that type-hints LoggerInterface
-        //     gets this same FileLogger auto-wired in — the instance built back in step
-        //     2.2 and already handed to Handler, registered here as-is (not a factory
-        //     closure) so the Container returns this exact instance instead of building
-        //     a second one.
+        // 4.5 Bind Logger
         $container->set(LoggerInterface::class, $logger);
+
+        // 4.6 Initialize View Engine
+        \Framework\View\View::init($basePath, $container);
 
         // 5. Normalize input channels from global states
         $request = Request::createFromGlobals();
@@ -251,6 +366,45 @@ final class Application
         //     JSON (Accept: application/json, or a JSON body) instead of the HTML
         //     debug/production page — see Handler::wantsJson().
         Handler::setRequest($request);
+
+        // 5.2 Check for Maintenance Mode (503)
+        $downFile = rtrim($basePath, '/') . '/storage/framework/down';
+        if (is_file($downFile)) {
+            $downData = json_decode((string) file_get_contents($downFile), true) ?: [];
+            $secret = $downData['secret'] ?? null;
+            $bypass = false;
+
+            if ($secret !== null && $secret !== '') {
+                if ($request->query('secret') === $secret) {
+                    $bypass = true;
+                    setcookie('trip_maintenance', (string) $secret, time() + 86400, '/');
+                } elseif ($request->cookie('trip_maintenance') === $secret) {
+                    $bypass = true;
+                }
+            }
+
+            if (!$bypass) {
+                $retry = (int) ($downData['retry'] ?? 60);
+                $message = (string) ($downData['message'] ?? 'The application is under scheduled maintenance.');
+
+                if ($request->wantsJson()) {
+                    $resp = Response::json(['error' => $message], 503)
+                        ->withHeader('Retry-After', (string) $retry);
+                } else {
+                    $content = \Framework\View\View::render('errors.503', [
+                        'status'  => 503,
+                        'message' => $message,
+                        'retry'   => $retry,
+                    ]);
+                    $resp = new Response($content, 503, [
+                        'Retry-After'  => (string) $retry,
+                        'Content-Type' => 'text/html; charset=UTF-8',
+                    ]);
+                }
+                $resp->send();
+                exit;
+            }
+        }
 
         // 6. Run the middleware pipeline and dispatch the request to the router.
         //    Middlewares auto-discovered under the reserved 'global' group

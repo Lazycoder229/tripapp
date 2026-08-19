@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Framework\Cache;
+namespace Framework\Session;
 
 /**
  * 'file' cache driver. Each entry is one file under $directory holding a

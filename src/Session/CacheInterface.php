@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace Framework\Cache;
+namespace Framework\Session;
 
 /**
  * Contract every cache driver must implement. Interface (not abstract class)
  * mirrors the framework's ConnectionInterface pattern — swap drivers by binding
  * a different concrete class to this interface in the Container.
- * @package Framework\Cache
+ * @package Framework\Session
  */
 interface CacheInterface
 {

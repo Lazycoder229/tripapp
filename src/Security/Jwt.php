@@ -94,7 +94,7 @@ final class Jwt
         $payload = $claims;
         $payload['iat'] = $now;
 
-        if ($ttl > 0) {
+        if ($ttl !== 0) {
             $payload['exp'] = $now + $ttl;
         }
 

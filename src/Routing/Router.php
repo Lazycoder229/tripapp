@@ -11,6 +11,7 @@ use Framework\Http\Response;
 use Framework\Http\Middleware\Pipelines;
 use Framework\Exception\RouteNotFoundException;
 use ReflectionClass;
+use ReflectionAttribute;
 use Exception;
 
 /**
@@ -18,15 +19,25 @@ use Exception;
  * 
  * Handles registering routes via attributes or manual HTTP methods,
  * matching incoming browser requests, and dispatching them.
+ * Supports static O(1) hash lookup, dynamic regex matching, and OPcache route caching.
  * 
  * @package Framework\Routing
  */
 final class Router
 {
+    /** @var array<string, array<string, array>> Static routes indexed by [METHOD][PATH] */
+    private array $staticRoutes = [];
+
+    /** @var array<string, array<int, array>> Dynamic routes indexed by [METHOD][] */
+    private array $dynamicRoutes = [];
+
     public function __construct(
         private Container $container,
         private array $routes = []
     ) {
+        if (!empty($this->routes)) {
+            $this->rebuildRouteIndexes();
+        }
     }
 
     /**
@@ -38,11 +49,11 @@ final class Router
      */
     public function registerController(string $controllerClass): self
     {
-        $reflection = new \ReflectionClass($controllerClass);
+        $reflection = new ReflectionClass($controllerClass);
 
-       // --- Class-level Route ---
-       //Scan the controller class for a #[Route] attribute to get a prefix and default middleware.
-        $classAttributes = $reflection->getAttributes(Route::class, \ReflectionAttribute::IS_INSTANCEOF);
+        // --- Class-level Route ---
+        // Scan the controller class for a #[Route] attribute to get a prefix and default middleware.
+        $classAttributes = $reflection->getAttributes(Route::class, ReflectionAttribute::IS_INSTANCEOF);
         $classPrefix = '';
         $classMiddleware = [];
 
@@ -55,7 +66,7 @@ final class Router
         // --- Method-level Routes ---
         // Scan each method for #[Route] attributes and register them with the combined path and middleware.
         foreach ($reflection->getMethods() as $method) {
-            $attributes = $method->getAttributes(Route::class, \ReflectionAttribute::IS_INSTANCEOF);
+            $attributes = $method->getAttributes(Route::class, ReflectionAttribute::IS_INSTANCEOF);
 
             foreach ($attributes as $attribute) {
                 $routeInstance = $attribute->newInstance();
@@ -80,35 +91,100 @@ final class Router
 
     /**
      * Registers a route internally with its method, path, handler, and middleware.
-     * Converts path parameters like {id} into regex capture groups.
+     * Automatically categorizes into static or dynamic routes for optimized matching.
      */
     private function addRoute(string $method, string $path, array|callable $handler, array $middleware = []): void
     {
         $cleanPath = '/' . trim($path, '/');
+        $httpMethod = strtoupper($method);
 
-        // Convert {param} placeholders to regex capture groups
-        // e.g. /users/{id} → #^/users/([a-zA-Z0-9_\-]+)$#
-        $regexPattern = preg_replace('/\{[a-zA-Z0-9_]+\}/', '([a-zA-Z0-9_\-]+)', $cleanPath);
-        $regexPattern = '#^' . $regexPattern . '$#';
-
-        $this->routes[] = [
-            'method'     => strtoupper($method),
+        $route = [
+            'method'     => $httpMethod,
             'path'       => $cleanPath,
-            'regex'      => $regexPattern,
             'handler'    => $handler,
             'middleware' => $middleware,
         ];
+
+        if (str_contains($cleanPath, '{')) {
+            // Convert {param} placeholders to regex capture groups
+            // e.g. /users/{id} → #^/users/([a-zA-Z0-9_\-]+)$#
+            $regexPattern = preg_replace('/\{[a-zA-Z0-9_]+\}/', '([a-zA-Z0-9_\-]+)', $cleanPath);
+            $route['regex'] = '#^' . $regexPattern . '$#';
+            $this->dynamicRoutes[$httpMethod][] = $route;
+        } else {
+            // Static route: direct O(1) hash lookup
+            $this->staticRoutes[$httpMethod][$cleanPath] = $route;
+        }
+
+        $this->routes[] = $route;
     }
 
     /**
      * Convenience methods for registering routes per HTTP method.
      * Internally calls addRoute with the appropriate HTTP verb.
      */
-    public function get(string $path, array|callable $handler): void    { $this->addRoute('GET',    $path, $handler); }
-    public function post(string $path, array|callable $handler): void   { $this->addRoute('POST',   $path, $handler); }
-    public function put(string $path, array|callable $handler): void    { $this->addRoute('PUT',    $path, $handler); }
-    public function patch(string $path, array|callable $handler): void  { $this->addRoute('PATCH',  $path, $handler); }
-    public function delete(string $path, array|callable $handler): void { $this->addRoute('DELETE', $path, $handler); }
+    public function get(string $path, array|callable $handler, array $middleware = []): void    { $this->addRoute('GET',    $path, $handler, $middleware); }
+    public function post(string $path, array|callable $handler, array $middleware = []): void   { $this->addRoute('POST',   $path, $handler, $middleware); }
+    public function put(string $path, array|callable $handler, array $middleware = []): void    { $this->addRoute('PUT',    $path, $handler, $middleware); }
+    public function patch(string $path, array|callable $handler, array $middleware = []): void  { $this->addRoute('PATCH',  $path, $handler, $middleware); }
+    public function delete(string $path, array|callable $handler, array $middleware = []): void { $this->addRoute('DELETE', $path, $handler, $middleware); }
+
+    /**
+     * Loads compiled route definitions from cache.
+     *
+     * @param array $cacheData
+     * @return self
+     */
+    public function loadFromCache(array $cacheData): self
+    {
+        $this->routes = $cacheData['routes'] ?? [];
+        $this->staticRoutes = $cacheData['static_routes'] ?? [];
+        $this->dynamicRoutes = $cacheData['dynamic_routes'] ?? [];
+
+        if (empty($this->staticRoutes) && empty($this->dynamicRoutes) && !empty($this->routes)) {
+            $this->rebuildRouteIndexes();
+        }
+
+        return $this;
+    }
+
+    /**
+     * Exports the compiled route tables for OPcache/file caching.
+     *
+     * @return array
+     */
+    public function getCompiledData(): array
+    {
+        return [
+            'routes'         => $this->routes,
+            'static_routes'  => $this->staticRoutes,
+            'dynamic_routes' => $this->dynamicRoutes,
+        ];
+    }
+
+    /**
+     * Rebuilds static and dynamic indexing from the flat $this->routes list.
+     */
+    private function rebuildRouteIndexes(): void
+    {
+        $this->staticRoutes = [];
+        $this->dynamicRoutes = [];
+
+        foreach ($this->routes as $route) {
+            $httpMethod = strtoupper($route['method'] ?? 'GET');
+            $cleanPath = '/' . trim($route['path'] ?? '/', '/');
+
+            if (isset($route['regex']) || str_contains($cleanPath, '{')) {
+                if (!isset($route['regex'])) {
+                    $regexPattern = preg_replace('/\{[a-zA-Z0-9_]+\}/', '([a-zA-Z0-9_\-]+)', $cleanPath);
+                    $route['regex'] = '#^' . $regexPattern . '$#';
+                }
+                $this->dynamicRoutes[$httpMethod][] = $route;
+            } else {
+                $this->staticRoutes[$httpMethod][$cleanPath] = $route;
+            }
+        }
+    }
 
     /**
      * Matches the incoming request to a registered route and dispatches it.
@@ -116,18 +192,45 @@ final class Router
      */
     public function dispatch(Request $request): Response
     {
-        $path   = $request->getPath();
+        $path   = '/' . trim($request->getPath(), '/');
         $method = $request->getMethod();
 
-        foreach ($this->routes as $route) {
-            // Check if the HTTP method matches and if the path matches the route's regex
-            if ($route['method'] !== $method || !preg_match($route['regex'], $path, $matches)) {
-                continue;
-            }
+        $matchedRoute = null;
+        $parameters = [];
 
-            // Remove the full match from the regex matches to get only the captured parameters
-            array_shift($matches);
-            $parameters = $matches;
+        // 1. Fast O(1) exact match lookup for static routes under current HTTP method
+        if (isset($this->staticRoutes[$method][$path])) {
+            $matchedRoute = $this->staticRoutes[$method][$path];
+        } elseif (isset($this->dynamicRoutes[$method])) {
+            // 2. Iterate only the dynamic regex routes matching the current HTTP method
+            foreach ($this->dynamicRoutes[$method] as $route) {
+                if (isset($route['regex']) && preg_match($route['regex'], $path, $matches)) {
+                    array_shift($matches);
+                    $matchedRoute = $route;
+                    $parameters = $matches;
+                    break;
+                }
+            }
+        }
+
+        // 3. Fallback: if no indexed match and legacy flat routes exist
+        if ($matchedRoute === null && empty($this->staticRoutes) && empty($this->dynamicRoutes) && !empty($this->routes)) {
+            foreach ($this->routes as $route) {
+                if (($route['method'] ?? '') !== $method) {
+                    continue;
+                }
+                $regex = $route['regex'] ?? ('#^' . preg_replace('/\{[a-zA-Z0-9_]+\}/', '([a-zA-Z0-9_\-]+)', $route['path'] ?? '') . '$#');
+                if (preg_match($regex, $path, $matches)) {
+                    array_shift($matches);
+                    $matchedRoute = $route;
+                    $parameters = $matches;
+                    break;
+                }
+            }
+        }
+
+        if ($matchedRoute !== null) {
+            $route = $matchedRoute;
 
             // Define the destination callable that will invoke the controller or handler with the request and parameters
             $destination = function (Request $request) use ($route, $parameters): Response {
@@ -155,8 +258,7 @@ final class Router
             };
 
             // --- Middleware Resolution ---
-            //if the route has middleware, resolve them (including group aliases) and run the pipeline before reaching the controller.
-            // Check if the route has any middleware defined
+            // If the route has middleware, resolve them (including group aliases) and run the pipeline before reaching the controller.
             if (!empty($route['middleware'])) {
                 $resolvedMiddlewares = [];
                 $groups = \Framework\Application::getMiddlewareGroups();
@@ -167,7 +269,7 @@ final class Router
                         // e.g. 'api.secure' → [RateLimitMiddleware::class, AuthMiddleware::class]
                         $resolvedMiddlewares = array_merge($resolvedMiddlewares, $groups[$item]);
                     } else {
-                        // if it's a direct middleware class, add it to the resolved list
+                        // If it's a direct middleware class, add it to the resolved list
                         $resolvedMiddlewares[] = $item;
                     }
                 }
@@ -192,7 +294,7 @@ final class Router
 
     /**
      * Returns all registered routes.
-     * Useful for debugging or route inspection.
+     * Useful for debugging, route listing, or testing.
      *
      * @return array An array of all registered routes.
      */

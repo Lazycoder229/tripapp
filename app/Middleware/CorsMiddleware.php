@@ -21,39 +21,41 @@ class CorsMiddleware implements MiddlewareInterface
             : $next($request);
 
         $origin = $request->header('origin');
+        $allowedOrigins = (string) Config::get('cors.allowed_origins', '*');
+        $allowCredentials = (bool) Config::get('cors.allow_credentials', false);
 
-        if ($origin !== null && $this->isOriginAllowed($origin)) {
-            $response = $response
-                ->withHeader('Access-Control-Allow-Origin', $origin)
-                ->withHeader('Vary', 'Origin');
+        if ($origin !== null && $this->isOriginAllowed($origin, $allowedOrigins)) {
+            // If wildcard origin and no credentials requested, return '*'
+            if (trim($allowedOrigins) === '*' && !$allowCredentials) {
+                $response = $response->withHeader('Access-Control-Allow-Origin', '*');
+            } else {
+                // If specific origin matched or credentials allowed, reflect the specific origin + Vary
+                $response = $response
+                    ->withHeader('Access-Control-Allow-Origin', $origin)
+                    ->withHeader('Vary', 'Origin');
 
-            // Only ever paired with a matched, non-wildcard origin — browsers
-            // reject Allow-Credentials when Allow-Origin is "*".
-            if ((bool) Config::get('cors.allow_credentials', false)) {
-                $response = $response->withHeader('Access-Control-Allow-Credentials', 'true');
+                if ($allowCredentials) {
+                    $response = $response->withHeader('Access-Control-Allow-Credentials', 'true');
+                }
             }
         }
 
         return $response
             ->withHeader('Access-Control-Allow-Methods', (string) Config::get('cors.allowed_methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS'))
-            ->withHeader('Access-Control-Allow-Headers', (string) Config::get('cors.allowed_headers', 'Content-Type,Authorization,X-Requested-With'))
+            ->withHeader('Access-Control-Allow-Headers', (string) Config::get('cors.allowed_headers', 'Content-Type,Authorization,X-Requested-With,X-CSRF-Token,X-API-Key'))
             ->withHeader('Access-Control-Max-Age', (string) Config::get('cors.max_age', 86400));
     }
 
     /**
-     * CORS_ALLOWED_ORIGINS="*" allows any origin (reflected back, not the literal
-     * "*" string). Otherwise it's a comma-separated allowlist, e.g.
-     * "https://app.com,https://admin.app.com" — anything not on it is denied.
+     * Checks if origin is in the allowed list or wildcard.
      */
-    private function isOriginAllowed(string $origin): bool
+    private function isOriginAllowed(string $origin, string $allowedOrigins): bool
     {
-        $allowed = (string) Config::get('cors.allowed_origins', '*');
-
-        if (trim($allowed) === '*') {
+        if (trim($allowedOrigins) === '*') {
             return true;
         }
 
-        $list = array_map('trim', explode(',', $allowed));
+        $list = array_map('trim', explode(',', $allowedOrigins));
         return in_array($origin, $list, true);
     }
 }

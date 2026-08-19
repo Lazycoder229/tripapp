@@ -8,7 +8,7 @@ use Framework\Http\Middleware\MiddlewareInterface;
 use Framework\Http\Middleware\Attribute\Middleware;
 use Framework\Http\Request;
 use Framework\Http\Response;
-use Framework\Cache\CacheInterface;
+use Framework\Session\CacheInterface;
 use Framework\Config\Config;
 
 /**
@@ -34,11 +34,9 @@ class RateLimitMiddleware implements MiddlewareInterface
 
     public function handle(Request $request, callable $next): Response
     {
-        $key = sprintf(
-            'throttle:%s:%s',
-            $request->getClientIp() ?? 'unknown',
-            $request->getPath()
-        );
+        $ip = $request->getClientIp() ?? '127.0.0.1';
+        $path = $request->getPath();
+        $key = 'throttle:' . sha1($ip . '|' . $path);
 
         $entry = $this->cache->get($key);
 

@@ -4,9 +4,19 @@
             "Framework\\": "src/",
             "App\\": "app/"
         }
-        
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
     },
     "require": {
         "vlucas/phpdotenv": "^5.6"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^13.3"
+    },
+    "scripts": {
+        "test": "phpunit"
     }
 }

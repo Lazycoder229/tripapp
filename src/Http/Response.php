@@ -68,6 +68,21 @@ class Response
     }
 
     /**
+     * Named constructor helper for rendering HTML views using the View Engine.
+     *
+     * @param string $view Dot notation view path (e.g. 'users.index' or 'home')
+     * @param array $data Variables to pass to the template
+     * @param int $statusCode HTTP status code (defaults to 200)
+     * @param array $headers Additional HTTP response headers
+     * @return self
+     */
+    public static function view(string $view, array $data = [], int $statusCode = 200, array $headers = []): self
+    {
+        $html = \Framework\View\View::render($view, $data);
+        return new self($html, $statusCode, array_merge(['Content-Type' => 'text/html; charset=UTF-8'], $headers));
+    }
+
+    /**
      * Named constructor helper for HTTP redirects.
      *
      * @param string $url Destination URL (relative or absolute).
@@ -227,6 +242,19 @@ class Response
     public function getHeaders(): array
     {
         return $this->headers;
+    }
+
+    /**
+     * Get a single response header by name (case-insensitive).
+     *
+     * @param string $name
+     * @param string|null $default
+     * @return string|null
+     */
+    public function getHeader(string $name, ?string $default = null): ?string
+    {
+        $normalized = str_replace('_', '-', strtolower($name));
+        return $this->headers[$normalized] ?? $default;
     }
 
     /**

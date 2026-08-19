@@ -354,33 +354,61 @@ final class Handler
     }
 
     /**
-     * Isang malinis at pormal na Error Page para sa Production environment
+     * Isang malinis at pormal na Error Page para sa Production environment.
+     * Sumusubok munang mag-render ng custom error view sa app/views/errors/{status}.php.
      */
     private function renderProductionPage(int $status): void
     {
-        $headline = $status === 404 ? 'Page Not Found' : 'Something Went Wrong';
-        $subtext  = $status === 404 
-            ? 'Sorry, the page you are looking for does not exist or has been moved.' 
-            : 'We are experiencing an internal server error. Our developers have been notified.';
+        // Subukang mag-render ng custom view sa app/views/errors/{status}.php kung mayroon
+        try {
+            if (class_exists(\Framework\View\View::class)) {
+                echo \Framework\View\View::render("errors.{$status}", ['status' => $status]);
+                return;
+            }
+        } catch (\Throwable) {
+            // Kung walang custom view o may issue sa view engine, magpatuloy sa fallback
+        }
+
+        $headline = match ($status) {
+            404 => 'Page Not Found',
+            403 => 'Forbidden',
+            419 => 'Page Expired (CSRF Token Mismatch)',
+            429 => 'Too Many Requests',
+            503 => 'Service Unavailable (Maintenance Mode)',
+            default => 'Something Went Wrong',
+        };
+
+        $subtext = match ($status) {
+            404 => 'Sorry, the page you are looking for does not exist or has been moved.',
+            403 => 'You do not have permission to access this resource.',
+            419 => 'Your session has expired. Please refresh the page and try again.',
+            429 => 'You have sent too many requests in a short period. Please try again later.',
+            503 => 'The server is temporarily unavailable due to maintenance. Please check back soon.',
+            default => 'We are experiencing an internal server error. Our developers have been notified.',
+        };
         ?>
         <!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title><?= $status ?> — <?= $headline ?></title>
             <style>
-                body { font-family: 'Segoe UI', sans-serif; background: #f8fafc; color: #334155; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
-                .card { max-width: 500px; width: 100%; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03); border-top: 4px solid #64748b; }
-                h1 { font-size: 64px; color: #64748b; margin: 0 0 10px 0; font-weight: 800; }
-                h2 { font-size: 20px; color: #1e293b; margin: 0 0 12px 0; font-weight: 600; }
-                p { font-size: 14px; color: #64748b; line-height: 1.6; margin: 0; }
+                body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+                .card { max-width: 520px; width: 100%; text-align: center; background: #1e293b; padding: 48px 36px; border-radius: 16px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5); border: 1px solid #334155; }
+                .status-code { font-size: 72px; font-weight: 900; line-height: 1; color: #38bdf8; margin: 0 0 16px 0; letter-spacing: -0.05em; }
+                h1 { font-size: 22px; color: #f1f5f9; margin: 0 0 12px 0; font-weight: 700; }
+                p { font-size: 15px; color: #94a3b8; line-height: 1.6; margin: 0 0 28px 0; }
+                .btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; background: #2563eb; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 600; border-radius: 8px; transition: background 0.2s ease; }
+                .btn:hover { background: #1d4ed8; }
             </style>
         </head>
         <body>
             <div class="card">
-                <h1><?= $status ?></h1>
-                <h2><?= $headline ?></h2>
+                <div class="status-code"><?= $status ?></div>
+                <h1><?= $headline ?></h1>
                 <p><?= $subtext ?></p>
+                <a href="/" class="btn">Return to Home</a>
             </div>
         </body>
         </html>
