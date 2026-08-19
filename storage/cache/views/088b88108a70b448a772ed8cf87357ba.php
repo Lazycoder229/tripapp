@@ -10,13 +10,13 @@
         .container { max-width: 1000px; margin: 0 auto; background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
     </style>
 
-    @stack('styles')
+    <?= $this->yieldStack('styles'); ?>
 </head>
 <body>
     <div class="container">
-        @yield('content')
+        <?= $this->yieldSection('content'); ?>
     </div>
 
-    @stack('scripts')
+    <?= $this->yieldStack('scripts'); ?>
 </body>
 </html>

@@ -37,5 +37,11 @@ class HomeController
         return Response::json(['message' => 'Hello World!']);
     }
 
-   
+   #[Get('/about')]
+public function about(Request $request): Response
+{
+    return Response::view('about', [
+        'urlValue' => 'test',
+    ]);
+}
 }
