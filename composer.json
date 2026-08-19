@@ -1,7 +1,4 @@
 {
-    "name": "lazycoder229/tripphp",
-    "description": "Trip PHP Framework — a lightweight PHP 8.4 micro-framework with a attribute-based routing, and a built-in DI container.",
-    "license": "MIT",
     "autoload": {
         "psr-4": {
             "Framework\\": "src/",
