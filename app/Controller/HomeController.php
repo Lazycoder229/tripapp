@@ -6,10 +6,7 @@ namespace App\Controller;
 
 use Framework\Http\Request;
 use Framework\Http\Response;
-use Framework\Routing\Attribute\Delete;
 use Framework\Routing\Attribute\Get;
-use Framework\Routing\Attribute\Post;
-use Framework\Routing\Attribute\Put;
 use Framework\Routing\Attribute\Route;
 
 /**
@@ -29,19 +26,9 @@ use Framework\Routing\Attribute\Route;
 #[Route('/')]
 class HomeController
 {
-
-
     #[Get('/')]
     public function index(Request $request): Response
     {
         return Response::json(['message' => 'Hello World!']);
     }
-
-   #[Get('/about')]
-public function about(Request $request): Response
-{
-    return Response::view('about', [
-        'urlValue' => 'test',
-    ]);
-}
 }
