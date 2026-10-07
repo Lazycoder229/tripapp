@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "905619d45f352fd53a7a4f5acf163d32",
+    "content-hash": "99e9e1caf33f4ff02478d2f6d9f19915",
     "packages": [
         {
             "name": "graham-campbell/result-type",
@@ -397,16 +397,16 @@
         },
         {
             "name": "trip/core",
-            "version": "v1.0.1",
+            "version": "v1.0.2",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Lazycoder229/tripphp.git",
-                "reference": "faabebede7f3db267651a4b40f3f92a8876f99dc"
+                "reference": "75275f2dacb9ac75a32af3bcf113a2b7e01cff30"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Lazycoder229/tripphp/zipball/faabebede7f3db267651a4b40f3f92a8876f99dc",
-                "reference": "faabebede7f3db267651a4b40f3f92a8876f99dc",
+                "url": "https://api.github.com/repos/Lazycoder229/tripphp/zipball/75275f2dacb9ac75a32af3bcf113a2b7e01cff30",
+                "reference": "75275f2dacb9ac75a32af3bcf113a2b7e01cff30",
                 "shasum": ""
             },
             "require": {
@@ -430,9 +430,9 @@
             "description": "A lightweight PHP framework for building modern web applications.",
             "support": {
                 "issues": "https://github.com/Lazycoder229/tripphp/issues",
-                "source": "https://github.com/Lazycoder229/tripphp/tree/v1.0.1"
+                "source": "https://github.com/Lazycoder229/tripphp/tree/v1.0.2"
             },
-            "time": "2026-10-06T23:36:27+00:00"
+            "time": "2026-10-07T00:43:16+00:00"
         },
         {
             "name": "vlucas/phpdotenv",
